@@ -1,0 +1,6 @@
+{
+  "name": "Taquigrafia Pro",
+  "description": "Aplicativo de transcrição automática de áudios de plenário e sessões, com formatação automática avançada para taquígrafos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
