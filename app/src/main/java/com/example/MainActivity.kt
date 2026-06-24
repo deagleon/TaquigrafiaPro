@@ -1543,7 +1543,8 @@ fun SettingsView(
                             "nvidia/nemotron-3-ultra-550b-a55b:free" to "NVIDIA Nemotron 3 Ultra 550B (Gratuito)",
                             "openai/gpt-oss-120b:free" to "OpenAI GPT-OSS 120B (Gratuito)",
                             "nousresearch/hermes-3-llama-3.1-405b:free" to "Nous Hermes 3 Llama 3.1 405B (Gratuito)",
-                            "deepseek/deepseek-v4-flash" to "DeepSeek v4 Flash"
+                            "deepseek/deepseek-v4-flash" to "DeepSeek v4 Flash",
+                            "inception/mercury-2" to "Inception Mercury 2"
                         )
 
                         ExposedDropdownMenuBox(
