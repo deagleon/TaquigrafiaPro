@@ -27,7 +27,9 @@ jobs:
 
     - name: Criar arquivo .env para o Build
       run: |
-        echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" > .env
+        echo "GEMINI_API_KEY=${GEMINI_API_KEY:-MY_GEMINI_API_KEY}" > .env
+      env:
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
     - name: Dar permissão de execução ao Gradle Wrapper
       run: chmod +x gradlew
