@@ -26,4 +26,7 @@ interface TranscriptionDao {
 
     @Query("UPDATE transcriptions SET title = :newTitle WHERE id = :id")
     suspend fun updateTitle(id: Int, newTitle: String)
+
+    @Query("UPDATE transcriptions SET transcriptText = :newText WHERE id = :id")
+    suspend fun updateTranscriptText(id: Int, newText: String)
 }

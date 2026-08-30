@@ -16,11 +16,35 @@ object RetrofitClient {
             level = HttpLoggingInterceptor.Level.HEADERS
         }
         OkHttpClient.Builder()
-            .connectTimeout(60, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .writeTimeout(60, TimeUnit.SECONDS)
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(300, TimeUnit.SECONDS)
+            .writeTimeout(300, TimeUnit.SECONDS)
+            .callTimeout(300, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
             .addInterceptor(logging)
+            .addInterceptor(RetryInterceptor(maxRetries = 1))
             .build()
+    }
+
+    private class RetryInterceptor(private val maxRetries: Int) : okhttp3.Interceptor {
+        override fun intercept(chain: okhttp3.Interceptor.Chain): okhttp3.Response {
+            var lastException: java.io.IOException? = null
+            repeat(maxRetries + 1) { attempt ->
+                try {
+                    return chain.proceed(chain.request())
+                } catch (e: java.net.SocketTimeoutException) {
+                    lastException = e
+                    if (attempt == maxRetries) throw e
+                } catch (e: java.io.IOException) {
+                    val msg = e.message ?: ""
+                    val isTimeout = msg.contains("timeout", ignoreCase = true)
+                    if (!isTimeout || attempt == maxRetries) throw e
+                    lastException = e
+                }
+                try { Thread.sleep(1000L * (attempt + 1)) } catch (_: InterruptedException) {}
+            }
+            throw lastException!!
+        }
     }
 
     private val moshi: Moshi by lazy {

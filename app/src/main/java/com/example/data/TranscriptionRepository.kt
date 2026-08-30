@@ -24,4 +24,8 @@ class TranscriptionRepository(private val transcriptionDao: TranscriptionDao) {
     suspend fun updateTitle(id: Int, title: String) {
         transcriptionDao.updateTitle(id, title)
     }
+
+    suspend fun updateTranscriptText(id: Int, text: String) {
+        transcriptionDao.updateTranscriptText(id, text)
+    }
 }

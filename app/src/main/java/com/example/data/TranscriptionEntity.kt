@@ -13,5 +13,7 @@ data class TranscriptionEntity(
     val transcriptText: String,
     val timestamp: Long = System.currentTimeMillis(),
     val modelUsed: String,
-    val audioUri: String? = null
+    val audioUri: String? = null,
+    val segmentsJson: String? = null,
+    val audioDurationMs: Int? = null
 )

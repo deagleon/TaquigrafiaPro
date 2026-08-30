@@ -7,20 +7,16 @@ import android.provider.OpenableColumns
 import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.BuildConfig
 import com.example.data.AppDatabase
 import com.example.data.TranscriptionEntity
 import com.example.data.TranscriptionRepository
-import com.example.data.api.Content
-import com.example.data.api.GenerateContentRequest
-import com.example.data.api.GenerationConfig
-import com.example.data.api.InlineData
-import com.example.data.api.Part
-import com.example.data.api.RetrofitClient
-import com.example.data.api.OpenRouterTranscriptionRequest
-import com.example.data.api.OpenRouterChatCompletionRequest
-import com.example.data.api.ChatMessage
-import com.example.data.api.InputAudio
+import com.example.data.api.Segment
+import com.example.data.provider.ApiKeyResolver
+import com.example.data.provider.ProviderRegistry
+import com.example.data.provider.TranscriptionRequest
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.Types
+import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -29,7 +25,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayOutputStream
 
 data class FileInfo(val name: String, val size: Long, val mimeType: String)
 
@@ -46,8 +41,9 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
     private val sharedPrefs = application.getSharedPreferences("taquigrafia_prefs", Context.MODE_PRIVATE)
     private val database = AppDatabase.getDatabase(application)
     private val repository = TranscriptionRepository(database.transcriptionDao())
+    private val apiKeyResolver = ApiKeyResolver(sharedPrefs)
+    private val providerRegistry = ProviderRegistry.create(sharedPrefs, apiKeyResolver)
 
-    // Reactive list of past transcriptions
     val transcriptionsHistory: StateFlow<List<TranscriptionEntity>> = repository.allTranscriptions
         .stateIn(
             scope = viewModelScope,
@@ -55,18 +51,15 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
             initialValue = emptyList()
         )
 
-    // Current selected audio file info
     private val _selectedFile = MutableStateFlow<FileInfo?>(null)
     val selectedFile: StateFlow<FileInfo?> = _selectedFile.asStateFlow()
 
     private val _selectedUri = MutableStateFlow<Uri?>(null)
     val selectedUri: StateFlow<Uri?> = _selectedUri.asStateFlow()
 
-    // Current state of transcription action
     private val _transcriptionState = MutableStateFlow<TranscriptionState>(TranscriptionState.Idle)
     val transcriptionState: StateFlow<TranscriptionState> = _transcriptionState.asStateFlow()
 
-    // Preferences configuration
     private val _selectedProvider = MutableStateFlow(sharedPrefs.getString("selected_provider", "gemini") ?: "gemini")
     val selectedProvider: StateFlow<String> = _selectedProvider.asStateFlow()
 
@@ -98,6 +91,8 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
     private val _systemPrompt = MutableStateFlow(sharedPrefs.getString("system_prompt", defaultSystemPrompt) ?: defaultSystemPrompt)
     val systemPrompt: StateFlow<String> = _systemPrompt.asStateFlow()
 
+    fun hasEffectiveKey(providerId: String): Boolean = apiKeyResolver.hasEffectiveKey(providerId)
+
     fun selectFile(uri: Uri) {
         val context = getApplication<Application>()
         var name = "audio_desconhecido"
@@ -116,7 +111,6 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         }
 
         val rawMimeType = context.contentResolver.getType(uri)
-        // Normalise common mime-types or fallback
         val mimeType = when {
             rawMimeType != null -> rawMimeType
             name.endsWith(".mp3") -> "audio/mp3"
@@ -180,7 +174,6 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
 
         viewModelScope.launch {
             try {
-                // Read and encode audio file bytes in background
                 val base64Data = withContext(Dispatchers.IO) {
                     readUriAsBase64(uri)
                 }
@@ -192,135 +185,44 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
 
                 _transcriptionState.value = TranscriptionState.Transcribing
 
-                var transcriptText: String?
-                val provider = _selectedProvider.value
-
-                if (provider == "openrouter") {
-                    val activeOpenRouterKey = _openRouterApiKey.value.trim()
-                    if (activeOpenRouterKey.isEmpty()) {
-                        _transcriptionState.value = TranscriptionState.Error(
-                            "Chave de API do OpenRouter não configurada. Por favor, insira sua chave nas Configurações (ícone de engrenagem no topo)."
-                        )
-                        return@launch
-                    }
-
-                    // Deduce format
-                    val extension = fileInfo.name.substringAfterLast(".").lowercase()
-                    val format = when (extension) {
-                        "wav" -> "wav"
-                        "mp3" -> "mp3"
-                        "m4a" -> "m4a"
-                        "ogg" -> "ogg"
-                        "flac" -> "flac"
-                        "aac" -> "aac"
-                        else -> "mp3"
-                    }
-
-                    val request = OpenRouterTranscriptionRequest(
-                        model = _selectedModel.value,
-                        inputAudio = InputAudio(
-                            data = base64Data,
-                            format = format
-                        )
-                    )
-
-                    val authHeader = "Bearer $activeOpenRouterKey"
-                    val response = withContext(Dispatchers.IO) {
-                        RetrofitClient.openRouterService.transcribeAudio(
-                            authorization = authHeader,
-                            request = request
-                        )
-                    }
-
-                    if (response.error != null) {
-                        _transcriptionState.value = TranscriptionState.Error(
-                            "Erro do OpenRouter: ${response.error.message ?: "Erro sem mensagem"}"
-                        )
-                        return@launch
-                    }
-
-                    val rawTranscript = response.text
-                    if (rawTranscript.isNullOrBlank()) {
-                        _transcriptionState.value = TranscriptionState.Error("O OpenRouter não retornou nenhum texto para esta transcrição.")
-                        return@launch
-                    }
-
-                    if (_isOpenRouterPostProcessingEnabled.value) {
-                        val chatRequest = OpenRouterChatCompletionRequest(
-                            model = _openRouterPostProcessingModel.value,
-                            messages = listOf(
-                                ChatMessage(role = "system", content = _systemPrompt.value),
-                                ChatMessage(role = "user", content = "Abaixo está a transcrição bruta do áudio. Por favor, reescreva-a seguindo rigorosamente as instruções do sistema, corrigindo pontuação, gramática, ortografia, quebras de linha e estruturação:\n\n$rawTranscript")
-                            )
-                        )
-
-                        val chatResponse = withContext(Dispatchers.IO) {
-                            RetrofitClient.openRouterService.chatCompletion(
-                                authorization = authHeader,
-                                request = chatRequest
-                            )
-                        }
-
-                        if (chatResponse.error != null) {
-                            _transcriptionState.value = TranscriptionState.Error(
-                                "Erro no pós-processamento do OpenRouter: ${chatResponse.error.message ?: "Erro sem mensagem"}"
-                            )
-                            return@launch
-                        }
-
-                        transcriptText = chatResponse.choices?.firstOrNull()?.message?.content
-                    } else {
-                        transcriptText = rawTranscript
-                    }
-                } else {
-                    // Resolve API key
-                    val activeKey = _apiKey.value.trim().ifEmpty {
-                        BuildConfig.GEMINI_API_KEY
-                    }
-
-                    if (activeKey.isEmpty() || activeKey == "MY_GEMINI_API_KEY") {
-                        _transcriptionState.value = TranscriptionState.Error(
-                            "Chave de API do Gemini não configurada. Por favor, insira sua chave nas Configurações (ícone de engrenagem no topo)."
-                        )
-                        return@launch
-                    }
-
-                    // Construct Request
-                    val request = GenerateContentRequest(
-                        contents = listOf(
-                            Content(
-                                parts = listOf(
-                                    Part(inlineData = InlineData(mimeType = fileInfo.mimeType, data = base64Data)),
-                                    Part(text = "Transcreva o áudio acima seguindo rigorosamente as instruções do sistema.")
-                                )
-                            )
-                        ),
-                        systemInstruction = Content(
-                            parts = listOf(Part(text = _systemPrompt.value))
-                        ),
-                        generationConfig = GenerationConfig(
-                            temperature = 0.2f // Lower temperature for high-fidelity transcribing/reasoning
-                        )
-                    )
-
-                    // Execute Call
-                    val response = withContext(Dispatchers.IO) {
-                        RetrofitClient.service.generateContent(
-                            model = _selectedModel.value,
-                            apiKey = activeKey,
-                            request = request
-                        )
-                    }
-
-                    transcriptText = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
+                val provider = providerRegistry.get(_selectedProvider.value)
+                if (provider == null) {
+                    _transcriptionState.value = TranscriptionState.Error("Provedor desconhecido: ${_selectedProvider.value}")
+                    return@launch
                 }
 
-                if (transcriptText.isNullOrBlank()) {
+                val result = withContext(Dispatchers.IO) {
+                    provider.transcribe(
+                        TranscriptionRequest(
+                            audioBase64 = base64Data,
+                            fileInfo = fileInfo,
+                            model = _selectedModel.value,
+                            systemPrompt = _systemPrompt.value
+                        )
+                    )
+                }
+
+                val transcriptionResult = result.getOrElse { e ->
+                    _transcriptionState.value = TranscriptionState.Error(e.message ?: "Erro desconhecido na transcrição.")
+                    return@launch
+                }
+
+                val transcriptText = transcriptionResult.text
+                if (transcriptText.isBlank()) {
                     _transcriptionState.value = TranscriptionState.Error("O provedor não retornou nenhum texto para esta transcrição.")
                     return@launch
                 }
 
-                // Save to Database
+                val segmentsJson = transcriptionResult.segments?.let { segs ->
+                    try {
+                        val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
+                        val type = Types.newParameterizedType(List::class.java, Segment::class.java)
+                        @Suppress("UNCHECKED_CAST")
+                        val adapter = moshi.adapter<List<Segment>>(type)
+                        adapter.toJson(segs)
+                    } catch (_: Exception) { null }
+                }
+
                 val savedAudioUri = withContext(Dispatchers.IO) {
                     saveUriToInternalStorage(uri, fileInfo.name)
                 } ?: uri
@@ -332,7 +234,9 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                     mimeType = fileInfo.mimeType,
                     transcriptText = transcriptText,
                     modelUsed = _selectedModel.value,
-                    audioUri = savedAudioUri.toString()
+                    audioUri = savedAudioUri.toString(),
+                    segmentsJson = segmentsJson,
+                    audioDurationMs = transcriptionResult.durationMs
                 )
 
                 val id = withContext(Dispatchers.IO) {
@@ -343,7 +247,15 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
 
             } catch (e: Exception) {
                 e.printStackTrace()
-                _transcriptionState.value = TranscriptionState.Error("Erro na transcrição: ${e.localizedMessage ?: "Erro desconhecido"}")
+                val msg = e.localizedMessage ?: ""
+                val isTimeout = e is java.net.SocketTimeoutException ||
+                    msg.contains("timeout", ignoreCase = true) ||
+                    (e.cause?.message?.contains("timeout", ignoreCase = true) == true)
+                _transcriptionState.value = if (isTimeout) {
+                    TranscriptionState.Error("Tempo de conexão esgotado. Áudio grande pode levar alguns minutos — verifique sua conexão e tente novamente.")
+                } else {
+                    TranscriptionState.Error("Erro na transcrição: ${e.localizedMessage ?: "Erro desconhecido"}")
+                }
             }
         }
     }
@@ -368,6 +280,14 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 repository.updateTitle(id, newTitle)
+            }
+        }
+    }
+
+    fun updateTranscriptText(id: Int, newText: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                repository.updateTranscriptText(id, newText)
             }
         }
     }

@@ -13,6 +13,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -26,6 +27,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -35,6 +38,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -43,10 +54,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -55,11 +69,15 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
@@ -76,12 +94,13 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Switch
-import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -109,6 +128,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.data.TranscriptionEntity
+import com.example.data.provider.ModelCatalog
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.TranscriptionState
 import com.example.ui.TranscriptionViewModel
@@ -179,7 +199,7 @@ fun MainAppScreen() {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         topBar = {
-            TopAppBar(
+            CenterAlignedTopAppBar(
                 title = {
                     Text(
                         text = when (currentScreen) {
@@ -187,8 +207,8 @@ fun MainAppScreen() {
                             Screen.Detail -> "Visualizar Transcrição"
                             Screen.Settings -> "Configurações"
                         },
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        style = MaterialTheme.typography.titleLarge,
+                        color = if (currentScreen == Screen.Dashboard) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
                     )
                 },
                 navigationIcon = {
@@ -197,7 +217,7 @@ fun MainAppScreen() {
                             Icon(
                                 imageVector = Icons.Default.ArrowBack,
                                 contentDescription = "Voltar",
-                                tint = MaterialTheme.colorScheme.onPrimaryContainer
+                                tint = if (currentScreen == Screen.Dashboard) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
                             )
                         }
                     }
@@ -216,8 +236,9 @@ fun MainAppScreen() {
                         }
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                    containerColor = if (currentScreen == Screen.Dashboard) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                    scrolledContainerColor = if (currentScreen == Screen.Dashboard) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer
                 )
             )
         }
@@ -253,6 +274,9 @@ fun MainAppScreen() {
                                 },
                                 onRename = { newTitle ->
                                     viewModel.renameTranscription(entity.id, newTitle)
+                                },
+                                onUpdateText = { newText ->
+                                    viewModel.updateTranscriptText(entity.id, newText)
                                 }
                             )
                         } else {
@@ -308,6 +332,7 @@ private fun formatDate(timestamp: Long): String {
     return sdf.format(Date(timestamp))
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DashboardView(
     viewModel: TranscriptionViewModel,
@@ -330,12 +355,11 @@ fun DashboardView(
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Aesthetic Top Soundwave / Banner
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(110.dp)
-                .clip(RoundedCornerShape(16.dp))
+                .height(132.dp)
+                .clip(MaterialTheme.shapes.large)
                 .background(
                     Brush.verticalGradient(
                         colors = listOf(
@@ -343,41 +367,43 @@ fun DashboardView(
                             MaterialTheme.colorScheme.secondaryContainer
                         )
                     )
-                ),
-            contentAlignment = Alignment.Center
+                )
         ) {
-            val isTranscribing = transcriptionState is TranscriptionState.Transcribing || 
-                                 transcriptionState is TranscriptionState.Loading
-            SoundWaveVisual(isAnimating = isTranscribing)
-            
+            val isTranscribing = transcriptionState is TranscriptionState.Transcribing ||
+                transcriptionState is TranscriptionState.Loading
+            Box(
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(32.dp).clip(RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp))
+            ) {
+                SoundWaveVisual(isAnimating = isTranscribing)
+            }
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.padding(8.dp)
+                modifier = Modifier.align(Alignment.Center).padding(horizontal = 16.dp).padding(bottom = 16.dp)
             ) {
                 Text(
                     text = "Transcrição de Áudios de Plenário",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp,
+                    style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer
                 )
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = "Gere textos fidedignos e formatados instantaneamente",
-                    fontSize = 12.sp,
+                    style = MaterialTheme.typography.bodySmall,
                     textAlign = TextAlign.Center,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                 )
             }
         }
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // New Transcription Selection Card
-        Card(
+        ElevatedCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 600.dp),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            shape = MaterialTheme.shapes.large,
+            colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
         ) {
             Column(
                 modifier = Modifier.padding(16.dp),
@@ -385,10 +411,9 @@ fun DashboardView(
             ) {
                 Text(
                     text = "Nova Transcrição",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp,
+                    style = MaterialTheme.typography.titleLarge,
                     modifier = Modifier.fillMaxWidth(),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -398,13 +423,14 @@ fun DashboardView(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(130.dp)
-                            .clip(RoundedCornerShape(12.dp))
+                            .height(132.dp)
+                            .clip(MaterialTheme.shapes.medium)
                             .border(
                                 width = 1.5.dp,
-                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
-                                shape = RoundedCornerShape(12.dp)
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
+                                shape = MaterialTheme.shapes.medium
                             )
+                            .background(MaterialTheme.colorScheme.surfaceContainerLow)
                             .clickable { onPickFile() }
                             .testTag("select_audio_card"),
                         contentAlignment = Alignment.Center
@@ -419,13 +445,13 @@ fun DashboardView(
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
                                 "Selecionar Áudio de Plenário",
-                                fontWeight = FontWeight.SemiBold,
+                                style = MaterialTheme.typography.titleSmall,
                                 color = MaterialTheme.colorScheme.primary
                             )
                             Text(
                                 "Suporta MP3, WAV, M4A, OGG, AAC, etc.",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
@@ -435,8 +461,8 @@ fun DashboardView(
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(
-                                MaterialTheme.colorScheme.surface,
-                                shape = RoundedCornerShape(12.dp)
+                                MaterialTheme.colorScheme.surfaceContainerHighest,
+                                shape = MaterialTheme.shapes.medium
                             )
                             .padding(12.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -448,7 +474,7 @@ fun DashboardView(
                             modifier = Modifier
                                 .size(40.dp)
                                 .background(
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
+                                    MaterialTheme.colorScheme.primaryContainer,
                                     shape = CircleShape
                                 )
                                 .padding(8.dp)
@@ -457,23 +483,20 @@ fun DashboardView(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = selectedFile!!.name,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
+                                style = MaterialTheme.typography.titleSmall,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
-                            Row {
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.Center) {
                                 Text(
                                     text = formatBytes(selectedFile!!.size),
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = selectedFile!!.mimeType.substringAfter("/").uppercase(),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
+                                AssistChip(
+                                    onClick = {},
+                                    label = { Text(selectedFile!!.mimeType.substringAfter("/").uppercase(), style = MaterialTheme.typography.labelSmall) },
+                                    colors = AssistChipDefaults.assistChipColors(containerColor = MaterialTheme.colorScheme.secondaryContainer, labelColor = MaterialTheme.colorScheme.onSecondaryContainer)
                                 )
                             }
                         }
@@ -484,62 +507,45 @@ fun DashboardView(
                             Icon(
                                 imageVector = Icons.Default.Close,
                                 contentDescription = "Remover áudio",
-                                tint = Color.Red.copy(alpha = 0.8f)
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    run {
+                        val providerLabel = if (currentProvider == "openrouter") "OpenRouter" else "Gemini"
+                        val modelShort = ModelCatalog.shortLabel(currentModel)
+                        val hasKey = viewModel.hasEffectiveKey(currentProvider)
+                        val isCustomKey = if (currentProvider == "openrouter") currentOpenRouterApiKey.trim().isNotEmpty() else currentApiKey.trim().isNotEmpty()
+                        val statusLabel = when { isCustomKey -> "Chave ativa"; hasKey -> "Chave padrão"; else -> "Sem chave" }
+                        val chipColor = when { isCustomKey || hasKey -> MaterialTheme.colorScheme.secondaryContainer to MaterialTheme.colorScheme.onSecondaryContainer; else -> MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer }
+                        FlowRow(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.Center) {
+                            AssistChip(
+                                onClick = {},
+                                label = { Text("Provedor: $providerLabel • $modelShort", style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                leadingIcon = { Icon(Icons.Default.AutoAwesome, null, modifier = Modifier.size(14.dp)) },
+                                colors = AssistChipDefaults.assistChipColors(containerColor = MaterialTheme.colorScheme.secondaryContainer, labelColor = MaterialTheme.colorScheme.onSecondaryContainer, leadingIconContentColor = MaterialTheme.colorScheme.onSecondaryContainer)
+                            )
+                            AssistChip(
+                                onClick = {},
+                                label = { Text(statusLabel, style = MaterialTheme.typography.labelSmall) },
+                                leadingIcon = { Icon(if (isCustomKey || hasKey) Icons.Default.Check else Icons.Default.Warning, null, modifier = Modifier.size(14.dp)) },
+                                colors = AssistChipDefaults.assistChipColors(containerColor = chipColor.first, labelColor = chipColor.second, leadingIconContentColor = chipColor.second)
                             )
                         }
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    // AI Key and Model configuration hint
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        val providerLabel = if (currentProvider == "openrouter") "OpenRouter" else "Gemini"
-                        val modelLabel = when (currentModel) {
-                            "gemini-3.5-flash" -> "Gemini 3.5 Flash"
-                            "gemini-3.1-pro-preview" -> "Gemini 3.1 Pro"
-                            "mistralai/voxtral-mini-transcribe" -> "Voxtral Mini"
-                            "microsoft/mai-transcribe-1.5" -> "MAI-Transcribe 1.5"
-                            "nvidia/parakeet-tdt-0.6b-v3" -> "Parakeet v3"
-                            "qwen/qwen3-asr-flash-2026-02-10" -> "Qwen3 ASR"
-                            "google/chirp-3" -> "Chirp 3"
-                            "openai/whisper-large-v3-turbo" -> "Whisper Large"
-                            else -> currentModel
-                        }
-                        Text(
-                            text = "Provedor: $providerLabel | Modelo: $modelLabel",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                            modifier = Modifier.weight(1f)
-                        )
-                        
-                        val isCustomKey = if (currentProvider == "openrouter") {
-                            currentOpenRouterApiKey.trim().isNotEmpty()
-                        } else {
-                            currentApiKey.trim().isNotEmpty()
-                        }
-                        Text(
-                            text = if (isCustomKey) "🔑 Chave ativa" else "🛠️ Chave padrão",
-                            fontSize = 11.sp,
-                            color = if (isCustomKey) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // Progress states
                     AnimatedVisibility(visible = transcriptionState !is TranscriptionState.Idle) {
                         Column(modifier = Modifier.fillMaxWidth()) {
                             when (transcriptionState) {
                                 is TranscriptionState.Loading -> {
                                     Text(
                                         text = "Carregando o arquivo de áudio...",
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Medium,
+                                        style = MaterialTheme.typography.labelLarge,
                                         color = MaterialTheme.colorScheme.primary,
                                         modifier = Modifier.padding(bottom = 6.dp)
                                     )
@@ -548,8 +554,7 @@ fun DashboardView(
                                 is TranscriptionState.Transcribing -> {
                                     Text(
                                         text = "Enviando e transcrevendo... Isso pode levar um minuto para áudios grandes.",
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Medium,
+                                        style = MaterialTheme.typography.labelLarge,
                                         color = MaterialTheme.colorScheme.primary,
                                         modifier = Modifier.padding(bottom = 6.dp)
                                     )
@@ -560,8 +565,8 @@ fun DashboardView(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .background(
-                                                Color.Red.copy(alpha = 0.1f),
-                                                shape = RoundedCornerShape(8.dp)
+                                                MaterialTheme.colorScheme.errorContainer,
+                                                shape = MaterialTheme.shapes.small
                                             )
                                             .padding(12.dp),
                                         verticalAlignment = Alignment.CenterVertically
@@ -569,13 +574,13 @@ fun DashboardView(
                                         Icon(
                                             imageVector = Icons.Default.Warning,
                                             contentDescription = "Erro",
-                                            tint = Color.Red
+                                            tint = MaterialTheme.colorScheme.onErrorContainer
                                         )
                                         Spacer(modifier = Modifier.width(8.dp))
                                         Text(
                                             text = (transcriptionState as TranscriptionState.Error).message,
-                                            color = Color.Red,
-                                            fontSize = 12.sp,
+                                            color = MaterialTheme.colorScheme.onErrorContainer,
+                                            style = MaterialTheme.typography.bodySmall,
                                             modifier = Modifier.weight(1f)
                                         )
                                     }
@@ -586,26 +591,29 @@ fun DashboardView(
                         }
                     }
 
-                    // Large Start Button
-                    val isActionActive = transcriptionState !is TranscriptionState.Loading && 
-                                         transcriptionState !is TranscriptionState.Transcribing
-                    
+                    val isActionActive = transcriptionState !is TranscriptionState.Loading &&
+                        transcriptionState !is TranscriptionState.Transcribing
+
                     Button(
                         onClick = { viewModel.startTranscription() },
                         enabled = isActionActive,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(48.dp)
+                            .height(56.dp)
                             .testTag("start_transcription_button"),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                        shape = RoundedCornerShape(12.dp)
+                        shape = MaterialTheme.shapes.large
                     ) {
-                        Icon(imageVector = Icons.Default.Refresh, contentDescription = null)
-                        Spacer(modifier = Modifier.width(8.dp))
+                        if (!isActionActive) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                            Spacer(modifier = Modifier.width(8.dp))
+                        } else {
+                            Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
                         Text(
                             "Iniciar Transcrição Inteligente",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp
+                            style = MaterialTheme.typography.labelLarge
                         )
                     }
                 }
@@ -614,7 +622,6 @@ fun DashboardView(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // History Section
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -623,22 +630,21 @@ fun DashboardView(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
-                imageVector = Icons.Default.Info,
+                imageVector = Icons.Default.History,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.primary
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = "Histórico de Transcrições",
-                fontWeight = FontWeight.Bold,
-                fontSize = 18.sp,
+                style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onBackground
             )
             Spacer(modifier = Modifier.weight(1f))
             Text(
-                text = "${history.size} salvas",
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+                text = if (history.size == 1) "1 transcrição salva" else "${history.size} transcrições salvas",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
 
@@ -646,13 +652,13 @@ fun DashboardView(
 
         if (history.isEmpty()) {
             // Elegant Empty state
-            Card(
+            ElevatedCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .widthIn(max = 600.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f)),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                shape = RoundedCornerShape(12.dp)
+                colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
+                shape = MaterialTheme.shapes.medium
             ) {
                 Column(
                     modifier = Modifier.padding(24.dp),
@@ -661,21 +667,21 @@ fun DashboardView(
                     Icon(
                         imageVector = Icons.Default.Info,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(40.dp)
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
                         text = "Sua biblioteca de transcrição está vazia.",
-                        fontWeight = FontWeight.Medium,
+                        style = MaterialTheme.typography.titleSmall,
                         textAlign = TextAlign.Center,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
                         text = "Os áudios que sua mãe transcrever ficarão guardados com segurança aqui para leitura e exportação.",
-                        fontSize = 12.sp,
+                        style = MaterialTheme.typography.bodySmall,
                         textAlign = TextAlign.Center,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 4.dp)
                     )
                 }
@@ -701,6 +707,7 @@ fun DashboardView(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun HistoryItemCard(
     item: TranscriptionEntity,
@@ -720,9 +727,9 @@ fun HistoryItemCard(
                         onDelete()
                         showDeleteConfirm = false
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.Red)
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError)
                 ) {
-                    Text("Excluir", color = Color.White)
+                    Text("Excluir")
                 }
             },
             dismissButton = {
@@ -733,76 +740,65 @@ fun HistoryItemCard(
         )
     }
 
-    Card(
+    ElevatedCard(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onClick() }
             .testTag("history_item_${item.id}"),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(12.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+        shape = MaterialTheme.shapes.medium,
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
     ) {
         Row(
             modifier = Modifier.padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            Box(
+                modifier = Modifier.size(40.dp).background(MaterialTheme.colorScheme.primaryContainer, CircleShape).padding(8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.GraphicEq, null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(18.dp))
+            }
+            Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = item.title,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
+                    style = MaterialTheme.typography.titleSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = item.transcriptText,
-                    fontSize = 12.sp,
+                    style = MaterialTheme.typography.bodySmall,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                    lineHeight = 16.sp
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                FlowRow(
+                    verticalArrangement = Arrangement.Center,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
                         text = formatDate(item.timestamp),
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Text(
-                        text = "•",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                    )
+                    Text("•", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
                         text = formatBytes(item.fileSize),
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Text(
-                        text = "•",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                    )
-                    Text(
-                        text = if (item.modelUsed == "gemini-3.5-flash") "Flash" else "Pro",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier
-                            .background(
-                                MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
-                                shape = RoundedCornerShape(4.dp)
-                            )
-                            .padding(horizontal = 5.dp, vertical = 2.dp)
+                    AssistChip(
+                        onClick = {},
+                        label = { Text(ModelCatalog.shortLabel(item.modelUsed), style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        colors = AssistChipDefaults.assistChipColors(containerColor = MaterialTheme.colorScheme.secondaryContainer, labelColor = MaterialTheme.colorScheme.onSecondaryContainer)
                     )
                 }
             }
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(4.dp))
             IconButton(
                 onClick = { showDeleteConfirm = true },
                 modifier = Modifier.testTag("delete_item_button_${item.id}")
@@ -810,22 +806,29 @@ fun HistoryItemCard(
                 Icon(
                     imageVector = Icons.Default.Delete,
                     contentDescription = "Deletar transcrição",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
     }
 }
 
+private data class TimedParagraph(
+    val text: String,
+    val startMs: Int,
+    val endMs: Int,
+)
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DetailView(
     entity: TranscriptionEntity,
     onDelete: () -> Unit,
-    onRename: (String) -> Unit
+    onRename: (String) -> Unit,
+    onUpdateText: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
-    val scrollState = rememberScrollState()
 
     var showRenameDialog by remember { mutableStateOf(false) }
 
@@ -845,85 +848,158 @@ fun DetailView(
     }
 
     LaunchedEffect(audioUri) {
-        // Release any existing player and reset position/states
-        mediaPlayer?.let {
-            try {
-                it.release()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-            mediaPlayer = null
-        }
+        mediaPlayer?.let { try { it.release() } catch (e: Exception) { e.printStackTrace() }; mediaPlayer = null }
         isPlaying = false
         currentPosition = 0
+        duration = 0
+        audioInitError = null
 
         if (!audioUri.isNullOrEmpty()) {
             try {
                 val mp = withContext(Dispatchers.IO) {
                     android.media.MediaPlayer().apply {
+                        setAudioAttributes(android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA).setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC).build())
                         val uri = Uri.parse(audioUri)
                         if (uri.scheme == "file" || uri.scheme == null) {
                             val path = uri.path ?: audioUri
                             val file = java.io.File(path)
-                            if (file.exists()) {
-                                setDataSource(file.absolutePath)
-                            } else {
-                                throw java.io.FileNotFoundException("Arquivo local não encontrado")
-                            }
+                            if (!file.exists()) throw java.io.FileNotFoundException("Arquivo local não encontrado: $path")
+                            setDataSource(file.absolutePath)
                         } else {
                             setDataSource(context, uri)
                         }
-                        
                         setOnErrorListener { _, what, extra ->
                             isPlaying = false
-                            audioInitError = "Erro na reprodução do áudio (código: $what, extra: $extra)"
+                            audioInitError = if (what == 1 && extra == -2147483648) "Emulador sem saída de áudio (-no-audio). O arquivo existe, mas a reprodução só funciona em aparelho real."
+                            else "Erro na reprodução do áudio (código: $what, extra: $extra)"
                             true
                         }
-                        
+                        setOnCompletionListener { isPlaying = false; currentPosition = 0 }
                         prepare()
                     }
                 }
                 mediaPlayer = mp
-                duration = mp.duration
-                audioInitError = null
+                try { duration = mp.duration } catch (_: Exception) { duration = 0 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                audioInitError = "O áudio original não pôde ser carregado. Ele pode ter sido movido, excluído ou estar sem permissão de acesso."
+                audioInitError = "O áudio original não pôde ser carregado (${e.javaClass.simpleName}: ${e.localizedMessage}). No emulador headless com -no-audio a reprodução falha, mas o arquivo está salvo."
             }
         } else {
             audioInitError = "Nenhum arquivo de áudio associado a esta transcrição."
         }
     }
 
-    LaunchedEffect(isPlaying) {
-        if (isPlaying) {
-            while (isPlaying) {
-                try {
-                    mediaPlayer?.let { mp ->
-                        if (mp.isPlaying) {
-                            currentPosition = mp.currentPosition
-                        } else {
-                            isPlaying = false
-                        }
-                    }
-                } catch (e: Exception) {
-                    isPlaying = false
+    LaunchedEffect(isPlaying, mediaPlayer) {
+        while (isPlaying) {
+            val mp = mediaPlayer
+            if (mp == null) { isPlaying = false; break }
+            try {
+                val playing = try { mp.isPlaying } catch (_: IllegalStateException) { isPlaying = false; break }
+                if (playing) {
+                    currentPosition = try { mp.currentPosition } catch (_: Exception) { currentPosition }
+                } else {
+                    isPlaying = false; break
                 }
-                kotlinx.coroutines.delay(250)
+            } catch (_: IllegalStateException) { isPlaying = false; break }
+            catch (_: Exception) { break }
+            kotlinx.coroutines.delay(180)
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { try { mediaPlayer?.release() } catch (_: Exception) {} }
+    }
+
+    fun splitParagraphs(raw: String): List<String> {
+        val t = raw.trim()
+        if (t.isEmpty()) return listOf(t)
+        val paras = when {
+            t.contains("\n\n") -> t.split(Regex("\n{2,}"))
+            t.contains("\n") -> t.split("\n")
+            else -> Regex("(?<=\\.\\s)").split(t).map { it.trim() }.flatMap { s ->
+                if (s.length > 360) {
+                    val chunks = mutableListOf<String>()
+                    var rest = s
+                    while (rest.length > 360) {
+                        val cut = rest.lastIndexOf(' ', 360).let { if (it < 180) 360 else it }
+                        chunks.add(rest.substring(0, cut).trim())
+                        rest = rest.substring(cut).trim()
+                    }
+                    if (rest.isNotEmpty()) chunks.add(rest)
+                    chunks
+                } else listOf(s)
+            }
+        }
+        return paras.map { it.trim() }.filter { it.isNotBlank() }.ifEmpty { listOf(t) }
+    }
+
+    val segments = remember(entity.segmentsJson) {
+        entity.segmentsJson?.let { json ->
+            try {
+                val moshi = com.squareup.moshi.Moshi.Builder().add(com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory()).build()
+                val type = com.squareup.moshi.Types.newParameterizedType(List::class.java, com.example.data.api.Segment::class.java)
+                @Suppress("UNCHECKED_CAST")
+                val adapter = moshi.adapter<List<com.example.data.api.Segment>>(type)
+                adapter.fromJson(json)?.takeIf { it.isNotEmpty() }
+            } catch (_: Exception) { null }
+        }
+    }
+    val rawParagraphs = remember(entity.transcriptText) { splitParagraphs(entity.transcriptText) }
+    val editableParas = remember { androidx.compose.runtime.mutableStateListOf<String>() }
+    var hasUnsavedChanges by remember { mutableStateOf(false) }
+    LaunchedEffect(entity.transcriptText) {
+        val fresh = splitParagraphs(entity.transcriptText)
+        editableParas.clear()
+        editableParas.addAll(fresh)
+        hasUnsavedChanges = false
+    }
+    val displayParas: List<String> = if (editableParas.isNotEmpty()) editableParas else rawParagraphs
+    val effectiveSource = if (displayParas.isNotEmpty()) displayParas else rawParagraphs
+    val effectiveDuration = remember(duration, effectiveSource, entity.audioDurationMs, segments) {
+        if (segments != null && segments.isNotEmpty()) ((segments.last().end * 1000).toInt().coerceAtLeast(1000))
+        else entity.audioDurationMs?.coerceAtLeast(1000)
+            ?: if (duration > 0) duration
+            else {
+                val totalWords = effectiveSource.sumOf { it.split(Regex("\\s+")).size }
+                (totalWords * 320).coerceAtLeast(1000)
+            }
+    }
+    val timedParagraphs: List<TimedParagraph> = remember(effectiveSource, effectiveDuration, segments) {
+        if (segments != null && segments.isNotEmpty()) {
+            segments.map { s -> TimedParagraph(s.text.trim(), (s.start * 1000).toInt(), (s.end * 1000).toInt()) }
+        } else {
+            val totalWords = effectiveSource.sumOf { it.split(Regex("\\s+")).size }.coerceAtLeast(1)
+            var acc = 0
+            effectiveSource.map { p ->
+                val words = p.split(Regex("\\s+")).size.coerceAtLeast(1)
+                val share = words.toFloat() / totalWords
+                val dur = (effectiveDuration * share).toInt().coerceAtLeast(300)
+                TimedParagraph(p, acc, acc + dur).also { acc += dur }
             }
         }
     }
-
-    LaunchedEffect(mediaPlayer) {
-        mediaPlayer?.setOnCompletionListener {
-            isPlaying = false
-            currentPosition = 0
+    var lastStableIdx by remember { mutableStateOf(0) }
+    val activeIdx by remember {
+        derivedStateOf {
+            if (timedParagraphs.isEmpty()) 0
+            else {
+                val biasedPos = (currentPosition - 180).coerceAtLeast(0)
+                val idx = timedParagraphs.indexOfFirst { biasedPos in it.startMs until (it.endMs - 60).coerceAtLeast(it.startMs + 1) }
+                    .let { if (it == -1) timedParagraphs.indexOfFirst { biasedPos in it.startMs until it.endMs } else it }
+                if (idx == -1) {
+                    if (biasedPos >= (timedParagraphs.lastOrNull()?.endMs ?: 0)) { lastStableIdx = timedParagraphs.lastIndex; timedParagraphs.lastIndex }
+                    else if (biasedPos < (timedParagraphs.firstOrNull()?.startMs ?: 0)) { lastStableIdx = 0; 0 }
+                    else lastStableIdx
+                } else { lastStableIdx = idx; idx }
+            }
         }
     }
-
-    DisposableEffect(mediaPlayer) {
-        onDispose {
-            mediaPlayer?.release()
+    var isExpanded by remember { mutableStateOf(false) }
+    val isImeVisible = WindowInsets.isImeVisible
+    val listState = rememberLazyListState()
+    LaunchedEffect(activeIdx, isPlaying, isExpanded) {
+        if (isPlaying && !isExpanded && timedParagraphs.isNotEmpty()) {
+            try { listState.animateScrollToItem(activeIdx, scrollOffset = -80) } catch (_: Exception) {}
         }
     }
 
@@ -965,102 +1041,75 @@ fun DetailView(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
+            .imePadding()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Document Metadata header
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .widthIn(max = 600.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f)),
-            shape = RoundedCornerShape(12.dp)
+        var headerExpanded by remember { mutableStateOf(false) }
+        if (!isExpanded) {
+        Row(
+            modifier = Modifier.fillMaxWidth().widthIn(max = 600.dp).clip(MaterialTheme.shapes.small).background(MaterialTheme.colorScheme.surfaceContainer).padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.padding(14.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = entity.title,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 17.sp,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer,
-                        modifier = Modifier.weight(1f)
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f, fill = false).clickable { showRenameDialog = true }
                     )
-                    IconButton(
-                        onClick = { showRenameDialog = true },
-                        modifier = Modifier.size(28.dp).testTag("edit_title_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Edit,
-                            contentDescription = "Editar Nome",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp)
-                        )
+                    IconButton(onClick = { showRenameDialog = true }, modifier = Modifier.size(22.dp).testTag("edit_title_button")) {
+                        Icon(Icons.Default.Edit, "Editar Nome", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
                     }
                 }
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Arquivo: ${entity.fileName}",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
-                    )
-                    Text(
-                        text = "Tamanho: ${formatBytes(entity.fileSize)}",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
-                    )
-                }
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(top = 2.dp)
-                ) {
-                    Text(
-                        text = "Data: ${formatDate(entity.timestamp)}",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
-                    )
-                    Text(
-                        text = "Modelo: ${entity.modelUsed}",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
-                    )
-                }
+                Text(
+                    text = "${formatBytes(entity.fileSize)} • ${formatTime(duration)} • ${ModelCatalog.shortLabel(entity.modelUsed)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            IconButton(onClick = { headerExpanded = !headerExpanded }, modifier = Modifier.size(28.dp)) {
+                Text(text = if (headerExpanded) "▴" else "▾", fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
+        AnimatedVisibility(visible = headerExpanded, modifier = Modifier.fillMaxWidth().widthIn(max = 600.dp)) {
+            Column(modifier = Modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh, MaterialTheme.shapes.small).padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Text("Arquivo: ${entity.fileName}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Data: ${formatDate(entity.timestamp)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Modelo: ${entity.modelUsed}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        if (!isExpanded) Spacer(modifier = Modifier.height(8.dp))
 
-        // Audio Player Card
-        Card(
+        if (!isExpanded || !isImeVisible) {
+        ElevatedCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 600.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
-            shape = RoundedCornerShape(12.dp),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+            shape = MaterialTheme.shapes.medium,
+            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
                 Text(
                     text = "Acompanhar Áudio Original",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Bold
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 
                 if (audioInitError != null) {
                     Text(
                         text = audioInitError ?: "",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
                     )
                 } else {
@@ -1070,19 +1119,18 @@ fun DetailView(
                     ) {
                         IconButton(
                             onClick = {
+                                val mp = mediaPlayer
+                                if (mp == null) {
+                                    Toast.makeText(context, audioInitError ?: "Áudio não carregado (emulador sem áudio: -no-audio). Arquivo salvo em disco.", Toast.LENGTH_LONG).show()
+                                    return@IconButton
+                                }
                                 try {
-                                    mediaPlayer?.let { mp ->
-                                        if (mp.isPlaying) {
-                                            mp.pause()
-                                            isPlaying = false
-                                        } else {
-                                            mp.start()
-                                            isPlaying = true
-                                        }
-                                    }
+                                    val playing = try { mp.isPlaying } catch (_: IllegalStateException) { false }
+                                    if (playing) { try { mp.pause() } catch (_: Exception) {}; isPlaying = false }
+                                    else { try { mp.start(); isPlaying = true } catch (e: Exception) { e.printStackTrace(); Toast.makeText(context, "Falha ao iniciar áudio: ${e.message} (emulador foi iniciado com -no-audio)", Toast.LENGTH_LONG).show() } }
                                 } catch (e: Exception) {
                                     e.printStackTrace()
-                                    Toast.makeText(context, "Erro ao controlar áudio", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "Erro ao controlar áudio: ${e.message}", Toast.LENGTH_SHORT).show()
                                 }
                             },
                             modifier = Modifier
@@ -1132,40 +1180,32 @@ fun DetailView(
 
                         Text(
                             text = "${formatTime(currentPosition)} / ${formatTime(duration)}",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
             }
         }
+        }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        if (!isExpanded) {
+        Spacer(modifier = Modifier.height(8.dp))
 
-        // Actions panel
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 600.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.End
         ) {
-            Button(
+            IconButton(
                 onClick = {
                     clipboardManager.setText(AnnotatedString(entity.transcriptText))
-                    Toast.makeText(context, "Texto copiado para a Área de Transferência!", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Texto copiado!", Toast.LENGTH_SHORT).show()
                 },
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("copy_text_button"),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-            ) {
-                Icon(imageVector = Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Copiar Texto", fontSize = 13.sp)
-            }
-
-            OutlinedButton(
+                modifier = Modifier.size(32.dp).testTag("copy_text_button")
+            ) { Icon(Icons.Default.Check, "Copiar", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp)) }
+            IconButton(
                 onClick = {
                     val shareIntent = Intent().apply {
                         action = Intent.ACTION_SEND
@@ -1174,43 +1214,163 @@ fun DetailView(
                     }
                     context.startActivity(Intent.createChooser(shareIntent, "Compartilhar Transcrição"))
                 },
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("share_text_button")
-            ) {
-                Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Compartilhar", fontSize = 13.sp)
-            }
+                modifier = Modifier.size(32.dp).testTag("share_text_button")
+            ) { Icon(Icons.Default.Share, "Compartilhar", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp)) }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(8.dp))
+        } else if (!isImeVisible) {
+            Spacer(modifier = Modifier.height(8.dp))
+        }
 
-        // Document Paper transcript body
-        Card(
+        fun persistEdits() {
+            val joined = editableParas.joinToString("\n\n")
+            onUpdateText(joined)
+            hasUnsavedChanges = false
+            Toast.makeText(context, "Transcrição salva!", Toast.LENGTH_SHORT).show()
+        }
+
+        ElevatedCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .widthIn(max = 600.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            shape = RoundedCornerShape(12.dp),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                .widthIn(max = 600.dp)
+                .then(if (isExpanded && isImeVisible) Modifier.padding(bottom = 4.dp) else Modifier),
+            colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
+            shape = MaterialTheme.shapes.medium,
+            elevation = CardDefaults.elevatedCardElevation(defaultElevation = if (isExpanded && isImeVisible) 0.dp else 1.dp)
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(scrollState)
-                    .padding(16.dp)
-            ) {
-                Text(
-                    text = entity.transcriptText,
-                    fontSize = 15.sp,
-                    lineHeight = 22.sp,
-                    fontFamily = FontFamily.SansSerif,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.testTag("transcript_body_text")
-                )
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = if (isExpanded && isImeVisible) 4.dp else 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (isExpanded) "Modo Edição" else "Transcrição",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (isExpanded) {
+                            if (hasUnsavedChanges) {
+                                TextButton(
+                                    onClick = { persistEdits() },
+                                    modifier = Modifier.testTag("save_edit_button"),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                ) { Text("Salvar", fontSize = 12.sp) }
+                            }
+                            IconButton(
+                                onClick = {
+                                    if (hasUnsavedChanges) persistEdits()
+                                    isExpanded = false
+                                },
+                                modifier = Modifier.size(28.dp).testTag("expand_text_button")
+                            ) {
+                                Icon(Icons.Default.Close, "Fechar edição", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                            }
+                        } else {
+                            IconButton(
+                                onClick = { isExpanded = true },
+                                modifier = Modifier.size(32.dp).testTag("expand_text_button")
+                            ) {
+                                Icon(Icons.Default.Edit, "Expandir e editar", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+                }
+                if (isExpanded) {
+                    val fullEditText = remember(editableParas.toList()) { editableParas.joinToString("\n\n") }
+                    Box(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp).padding(bottom = 12.dp)
+                    ) {
+                        val scrollState = rememberScrollState()
+                        Box(
+                            modifier = Modifier.fillMaxSize().verticalScroll(scrollState).testTag("transcript_body_text")
+                        ) {
+                            val annotated = androidx.compose.ui.text.buildAnnotatedString {
+                                editableParas.forEachIndexed { i, para ->
+                                    if (i > 0) append("\n\n")
+                                    val start = length
+                                    append(para)
+                                    val end = length
+                                    if (i == activeIdx) {
+                                        addStyle(
+                                            androidx.compose.ui.text.SpanStyle(
+                                                background = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                fontWeight = FontWeight.SemiBold
+                                            ), start, end
+                                        )
+                                    }
+                                    addStringAnnotation("para", i.toString(), start, end)
+                                }
+                            }
+                            Text(
+                                text = annotated,
+                                fontSize = 15.sp,
+                                lineHeight = 22.sp,
+                                fontFamily = FontFamily.SansSerif,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            OutlinedTextField(
+                                value = fullEditText,
+                                onValueChange = { v ->
+                                    val parts = v.split(Regex("\n{2,}")).map { it.trim() }
+                                    editableParas.clear()
+                                    editableParas.addAll(if (parts.all { it.isEmpty() }) listOf("") else parts.filter { it.isNotEmpty() }.ifEmpty { listOf("") })
+                                    if (v.endsWith("\n\n")) editableParas.add("")
+                                    hasUnsavedChanges = true
+                                },
+                                modifier = Modifier.fillMaxSize().testTag("expanded_text_field"),
+                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 15.sp, lineHeight = 22.sp, fontFamily = FontFamily.SansSerif, color = Color.Transparent),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = Color.Transparent,
+                                    unfocusedBorderColor = Color.Transparent,
+                                    focusedContainerColor = Color.Transparent,
+                                    unfocusedContainerColor = Color.Transparent,
+                                    cursorColor = MaterialTheme.colorScheme.primary
+                                ),
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize().testTag("transcript_body_text"),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        itemsIndexed(timedParagraphs) { idx, para ->
+                            val isActive = idx == activeIdx
+                            val bg = if (isActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f) else Color.Transparent
+                            val tc = if (isActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                            Text(
+                                text = para.text,
+                                fontSize = 15.sp,
+                                lineHeight = 22.sp,
+                                fontFamily = FontFamily.SansSerif,
+                                color = tc,
+                                fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(bg)
+                                    .clickable {
+                                        try {
+                                            mediaPlayer?.seekTo(para.startMs)
+                                            currentPosition = para.startMs
+                                        } catch (_: Exception) {
+                                            currentPosition = para.startMs
+                                        }
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                                    .testTag("paragraph_$idx")
+                            )
+                        }
+                    }
+                }
             }
         }
         
@@ -1284,10 +1444,10 @@ fun SettingsView(
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Button(
-                        onClick = { 
+                        onClick = {
                             providerState = "gemini"
-                            if (modelState != "gemini-3.5-flash" && modelState != "gemini-3.1-pro-preview") {
-                                modelState = "gemini-3.5-flash"
+                            if (ModelCatalog.geminiModels.none { it.id == modelState }) {
+                                modelState = ModelCatalog.geminiModels.first().id
                             }
                         },
                         colors = ButtonDefaults.buttonColors(
@@ -1301,18 +1461,10 @@ fun SettingsView(
                     }
 
                     Button(
-                        onClick = { 
+                        onClick = {
                             providerState = "openrouter"
-                            val openRouterModels = listOf(
-                                "mistralai/voxtral-mini-transcribe",
-                                "microsoft/mai-transcribe-1.5",
-                                "nvidia/parakeet-tdt-0.6b-v3",
-                                "qwen/qwen3-asr-flash-2026-02-10",
-                                "google/chirp-3",
-                                "openai/whisper-large-v3-turbo"
-                            )
-                            if (!openRouterModels.contains(modelState)) {
-                                modelState = "mistralai/voxtral-mini-transcribe"
+                            if (ModelCatalog.openRouterTranscriptionModels.none { it.id == modelState }) {
+                                modelState = ModelCatalog.openRouterTranscriptionModels.first().id
                             }
                         },
                         colors = ButtonDefaults.buttonColors(
@@ -1375,7 +1527,7 @@ fun SettingsView(
                     
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Insira sua chave de API do OpenRouter para acessar os modelos de áudio. Ela é mantida apenas localmente no dispositivo.",
+                        text = "Se deixar em branco e houver chave de build (OPENROUTER_API_KEY), ela será usada. Caso contrário, configure aqui.",
                         fontSize = 11.sp,
                         lineHeight = 15.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
@@ -1411,7 +1563,7 @@ fun SettingsView(
                     
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "O sistema utiliza a chave global padrão integrada se este campo for deixado em branco. Insira uma chave pessoal caso atinja limites de uso diários.",
+                        text = "Se deixar em branco e houver chave de build (GEMINI_API_KEY), ela será usada. Caso contrário, configure aqui.",
                         fontSize = 11.sp,
                         lineHeight = 15.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
@@ -1438,19 +1590,9 @@ fun SettingsView(
 
                 var expanded by remember { mutableStateOf(false) }
                 val modelsList = if (providerState == "openrouter") {
-                    listOf(
-                        "mistralai/voxtral-mini-transcribe" to "Mistral Voxtral Mini",
-                        "microsoft/mai-transcribe-1.5" to "Microsoft MAI-Transcribe 1.5",
-                        "nvidia/parakeet-tdt-0.6b-v3" to "NVIDIA Parakeet v3",
-                        "qwen/qwen3-asr-flash-2026-02-10" to "Qwen3 ASR Flash",
-                        "google/chirp-3" to "Google Chirp 3",
-                        "openai/whisper-large-v3-turbo" to "OpenAI Whisper Large v3 Turbo"
-                    )
+                    ModelCatalog.openRouterTranscriptionModels.map { it.id to it.label }
                 } else {
-                    listOf(
-                        "gemini-3.5-flash" to "Gemini 3.5 Flash (Ultra-Rápido)",
-                        "gemini-3.1-pro-preview" to "Gemini 3.1 Pro (Precisão Máxima)"
-                    )
+                    ModelCatalog.geminiModels.map { it.id to it.label }
                 }
 
                 ExposedDropdownMenuBox(
@@ -1539,13 +1681,7 @@ fun SettingsView(
                         Spacer(modifier = Modifier.height(14.dp))
                         
                         var postModelExpanded by remember { mutableStateOf(false) }
-                        val postModelsList = listOf(
-                            "nvidia/nemotron-3-ultra-550b-a55b:free" to "NVIDIA Nemotron 3 Ultra 550B (Gratuito)",
-                            "openai/gpt-oss-120b:free" to "OpenAI GPT-OSS 120B (Gratuito)",
-                            "nousresearch/hermes-3-llama-3.1-405b:free" to "Nous Hermes 3 Llama 3.1 405B (Gratuito)",
-                            "deepseek/deepseek-v4-flash" to "DeepSeek v4 Flash",
-                            "inception/mercury-2" to "Inception Mercury 2"
-                        )
+                        val postModelsList = ModelCatalog.openRouterPostProcessingModels.map { it.id to it.label }
 
                         ExposedDropdownMenuBox(
                             expanded = postModelExpanded,
@@ -1669,14 +1805,14 @@ fun SoundWaveVisual(isAnimating: Boolean) {
         initialValue = 0f,
         targetValue = (2 * Math.PI).toFloat(),
         animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = LinearEasing),
+            animation = tween(1400, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "wave_phase"
     )
 
-    val primaryColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-    val secondaryColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.10f)
+    val primaryColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+    val secondaryColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.08f)
 
     Canvas(modifier = Modifier.fillMaxSize()) {
         val width = size.width
@@ -1719,11 +1855,10 @@ fun SoundWaveVisual(isAnimating: Boolean) {
                 end = Offset(width - 20f, centerY),
                 strokeWidth = 2.dp.toPx()
             )
-            // Some rhythmic pulses
-            for (i in 0..10) {
-                val progress = i / 10f
+            for (i in 0..6) {
+                val progress = i / 6f
                 val x = 40f + progress * (width - 80f)
-                val lineH = if (i % 2 == 0) 15f else 8f
+                val lineH = if (i % 2 == 0) 10f else 6f
                 drawLine(
                     color = primaryColor,
                     start = Offset(x, centerY - lineH),

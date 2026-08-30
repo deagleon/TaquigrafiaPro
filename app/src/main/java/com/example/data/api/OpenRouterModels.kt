@@ -6,7 +6,9 @@ import com.squareup.moshi.JsonClass
 @JsonClass(generateAdapter = true)
 data class OpenRouterTranscriptionRequest(
     @Json(name = "model") val model: String,
-    @Json(name = "input_audio") val inputAudio: InputAudio
+    @Json(name = "input_audio") val inputAudio: InputAudio,
+    @Json(name = "response_format") val responseFormat: String? = null,
+    @Json(name = "timestamp_granularities") val timestampGranularities: List<String>? = null,
 )
 
 @JsonClass(generateAdapter = true)
@@ -18,7 +20,29 @@ data class InputAudio(
 @JsonClass(generateAdapter = true)
 data class OpenRouterTranscriptionResponse(
     @Json(name = "text") val text: String? = null,
+    @Json(name = "language") val language: String? = null,
+    @Json(name = "duration") val duration: Double? = null,
+    @Json(name = "segments") val segments: List<Segment>? = null,
+    @Json(name = "words") val words: List<Word>? = null,
+    @Json(name = "task") val task: String? = null,
     @Json(name = "error") val error: OpenRouterError? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class Segment(
+    @Json(name = "id") val id: Int,
+    @Json(name = "seek") val seek: Int,
+    @Json(name = "start") val start: Double,
+    @Json(name = "end") val end: Double,
+    @Json(name = "text") val text: String,
+    @Json(name = "temperature") val temperature: Double? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class Word(
+    @Json(name = "word") val word: String,
+    @Json(name = "start") val start: Double,
+    @Json(name = "end") val end: Double,
 )
 
 @JsonClass(generateAdapter = true)
