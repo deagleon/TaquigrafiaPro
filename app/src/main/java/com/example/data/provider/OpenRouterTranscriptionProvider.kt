@@ -36,20 +36,65 @@ class OpenRouterTranscriptionProvider(
         }
 
         val authHeader = "Bearer $activeKey"
-        val isWhisper = "whisper" in request.model.lowercase()
-        val wantsTimestamps = isWhisper && prefs.getBoolean("openrouter_timestamps_enabled", true)
-        val transcriptionRequest = OpenRouterTranscriptionRequest(
-            model = request.model,
-            inputAudio = InputAudio(data = request.audioBase64, format = format),
-            responseFormat = if (wantsTimestamps) "verbose_json" else null,
-            timestampGranularities = if (wantsTimestamps) listOf("segment") else null,
-        )
+        val wantsTimestamps = prefs.getBoolean("openrouter_timestamps_enabled", true)
+        val supportsVerbose = request.model.lowercase().let { m ->
+            "whisper" in m || "gpt-4o-mini-transcribe" in m || "gpt-4o-transcribe" in m || "gpt-transcribe" in m || "chirp" in m
+        }
+        val useVerbose = wantsTimestamps && supportsVerbose
+        val base64Len = request.audioBase64.length
+        if (base64Len > 25 * 1024 * 1024) {
+            android.util.Log.w("OpenRouterSTT", "payload oversize base64Len=$base64Len >25MB, will rely on chunking")
+        }
+
+        suspend fun doTranscribe(
+            responseFormat: String?,
+            timestampGranularities: List<String>?,
+        ): com.example.data.api.OpenRouterTranscriptionResponse {
+            return service.transcribeAudio(
+                authorization = authHeader,
+                request = OpenRouterTranscriptionRequest(
+                    model = request.model,
+                    inputAudio = InputAudio(data = request.audioBase64, format = format),
+                    language = "pt",
+                    temperature = 0.0,
+                    prompt = null,
+                    responseFormat = responseFormat,
+                    timestampGranularities = timestampGranularities,
+                )
+            )
+        }
+
+        fun httpErrorBody(e: retrofit2.HttpException): String = try {
+            e.response()?.errorBody()?.string()?.take(600) ?: ""
+        } catch (_: Exception) { "" }
+
+        fun isHttp400(e: Exception): Boolean {
+            val cause = generateSequence<Throwable>(e) { it.cause }.toList()
+            return cause.any { c ->
+                c is retrofit2.HttpException && c.code() == 400
+            } || (e as? retrofit2.HttpException)?.code() == 400
+                || (e.message ?: "").contains("HTTP 400")
+                || (e.cause?.message ?: "").contains("HTTP 400")
+        }
 
         val response = try {
-            service.transcribeAudio(
-                authorization = authHeader,
-                request = transcriptionRequest
-            )
+            if (useVerbose) {
+                try {
+                    doTranscribe("verbose_json", listOf("segment"))
+                } catch (e: Exception) {
+                    val body = (e as? retrofit2.HttpException)?.let { httpErrorBody(it) } ?: ""
+                    android.util.Log.e("OpenRouterSTT", "verbose_json failed model=${request.model} body=$body err=${e.message}")
+                    if (isHttp400(e)) {
+                        android.util.Log.w("OpenRouterSTT", "fallback to plain json model=${request.model}")
+                        doTranscribe(null, null)
+                    } else throw e
+                }
+            } else {
+                if (wantsTimestamps && !supportsVerbose) {
+                    android.util.Log.w("OpenRouterSTT", "model ${request.model} does not support verbose_json, timestamps disabled")
+                }
+                doTranscribe(null, null)
+            }
         } catch (e: java.net.SocketTimeoutException) {
             return Result.failure(IllegalStateException("Tempo de conexão esgotado. Áudio grande pode levar alguns minutos — verifique sua conexão e tente novamente.", e))
         } catch (e: java.io.IOException) {
@@ -57,9 +102,34 @@ class OpenRouterTranscriptionProvider(
                 return Result.failure(IllegalStateException("Tempo de conexão esgotado. Áudio grande pode levar alguns minutos — verifique sua conexão e tente novamente.", e))
             }
             throw e
+        } catch (e: retrofit2.HttpException) {
+            val body = httpErrorBody(e)
+            android.util.Log.e("OpenRouterSTT", "HTTP ${e.code()} body=$body model=${request.model}")
+            if (e.code() == 400) {
+                return Result.failure(IllegalStateException("Erro 400 do OpenRouter: ${body.ifEmpty { e.message() }} — tente outro modelo (whisper/gpt-4o-transcribe com timestamps) ou desative timestamps.", e))
+            }
+            throw e
         }
 
         if (response.error != null) {
+            android.util.Log.e("OpenRouterSTT", "response.error code=${response.error.code} msg=${response.error.message} model=${request.model}")
+            val isVerboseJsonNotSupported = response.error.code == 400 &&
+                (response.error.message ?: "").contains("response_format", ignoreCase = true)
+            if (isVerboseJsonNotSupported && useVerbose) {
+                val fallback = try {
+                    doTranscribe(null, null)
+                } catch (e: Exception) {
+                    return Result.failure(IllegalStateException("Erro do OpenRouter: ${response.error.message ?: "Erro sem mensagem"}", e))
+                }
+                if (fallback.error != null) {
+                    return Result.failure(IllegalStateException("Erro do OpenRouter: ${fallback.error.message ?: "Erro sem mensagem"}"))
+                }
+                val fbText = fallback.text
+                if (fbText.isNullOrBlank()) {
+                    return Result.failure(IllegalStateException("O OpenRouter não retornou nenhum texto para esta transcrição."))
+                }
+                return Result.success(TranscriptionResult(text = fbText, segments = null, durationMs = fallback.duration?.let { (it * 1000).toInt() }, language = fallback.language))
+            }
             return Result.failure(IllegalStateException("Erro do OpenRouter: ${response.error.message ?: "Erro sem mensagem"}"))
         }
 
@@ -68,24 +138,76 @@ class OpenRouterTranscriptionProvider(
             return Result.failure(IllegalStateException("O OpenRouter não retornou nenhum texto para esta transcrição."))
         }
 
-        val segments = response.segments
+        val rawSegments = response.segments
         val durationMs = response.duration?.let { (it * 1000).toInt() }
+        val cleanedSegments = com.example.data.SegmentUtils.cleanAndDeduplicate(rawSegments)
+        // Guard: if segment dedup collapsed >60% of long transcript (e.g. 60->10 for 5:26 video), false-positive → revert to Pass1
+        val segments = cleanedSegments?.let { cs ->
+            val rawSize = rawSegments?.size ?: 0
+            if (rawSize > 30 && cs.size < rawSize * 0.4) {
+                android.util.Log.w("OpenRouterSTT", "segment over-pruned raw=$rawSize cleaned=${cs.size}, reverting to Pass1")
+                // Revert to Pass1-only (adjacent dedup) to preserve legitimate content — DRY via SegmentUtils
+                rawSegments?.let { raw ->
+                    val valid = raw.filter { it.text.isNotBlank() && it.end >= it.start }.sortedBy { it.start }
+                    val pass1 = com.example.data.SegmentUtils.pass1AdjacentDedup(valid)
+                    if (pass1.size >= rawSize * 0.4) pass1 else raw
+                } ?: cs
+            } else cs
+        } ?: cleanedSegments
+        val cleanRawTranscript = if (!segments.isNullOrEmpty()) {
+            segments.joinToString("\n\n") { it.text.trim() }
+        } else {
+            rawTranscript.trim()
+        }
+
+        // Barreira textual final: remove ciclos em texto puro
+        // Guard: se limpeza cortar >50% de texto longo, é provável falso-positivo → preserva original
+        val dedupedRaw = com.example.data.SegmentUtils.cleanTranscriptText(cleanRawTranscript)
+        android.util.Log.d("DiagTrunc", "clean in=${cleanRawTranscript.length} out=${dedupedRaw.length} segments raw=${rawSegments?.size} cleaned=${segments?.size}")
+        val finalRawText = when {
+            dedupedRaw != cleanRawTranscript && dedupedRaw.length < cleanRawTranscript.length * 0.5 && cleanRawTranscript.length > 1000 -> {
+                android.util.Log.w("OpenRouterSTT", "cleanTranscriptText over-pruned raw ${cleanRawTranscript.length} -> ${dedupedRaw.length}, reverting")
+                cleanRawTranscript
+            }
+            dedupedRaw != cleanRawTranscript -> {
+                android.util.Log.w("OpenRouterSTT", "cleanTranscriptText pruned raw ${cleanRawTranscript.length} -> ${dedupedRaw.length}")
+                dedupedRaw
+            }
+            else -> cleanRawTranscript
+        }
+
+        // Detecção de truncamento suspeitosamente curto vs duração (5min ~4500 chars, 26min ~23000 chars)
+        durationMs?.let { dur ->
+            val expectedChars = (dur / 1000.0 * 7.5).toInt()
+            if (dur > 4 * 60 * 1000 && finalRawText.length < expectedChars * 0.25 && finalRawText.length < 2000) {
+                android.util.Log.w("OpenRouterSTT", "transcript suspiciously short dur=${dur}ms expected~${expectedChars} chars got ${finalRawText.length} — modelo pode ter truncado, sugerindo chunking")
+            }
+        }
+
+        val postProcessingEnabled = prefs.getBoolean("openrouter_post_processing_enabled", false)
         val useRawWithTimestamps = wantsTimestamps && !segments.isNullOrEmpty()
 
-        val postProcessingEnabled = prefs.getBoolean("openrouter_post_processing_enabled", true)
         if (!postProcessingEnabled || useRawWithTimestamps) {
-            return Result.success(TranscriptionResult(text = rawTranscript, segments = segments, durationMs = durationMs, language = response.language))
+            android.util.Log.d("OpenRouterSTT", "segments raw=${rawSegments?.size} cleaned=${segments?.size} duration=${durationMs} textLen=${finalRawText.length}")
+            return Result.success(TranscriptionResult(text = finalRawText, segments = segments, durationMs = durationMs, language = response.language))
         }
 
         val postProcessingModel = prefs.getString("openrouter_post_processing_model", "nvidia/nemotron-3-ultra-550b-a55b:free")
             ?: "nvidia/nemotron-3-ultra-550b-a55b:free"
 
+        val strictUserPrompt = """
+            Abaixo está a transcrição BRUTA já fiel ao áudio. Sua tarefa é APENAS corrigir pontuação, ortografia e quebras de linha, SEM alterar palavras, SEM adicionar ou remover conteúdo, SEM inventar. Se houver [inaudível], preserve exatamente. Mantenha literalidade absoluta. Não adicione introduções, resumos ou comentários. Texto bruto:
+
+            $finalRawText
+        """.trimIndent()
+
         val chatRequest = OpenRouterChatCompletionRequest(
             model = postProcessingModel,
             messages = listOf(
                 ChatMessage(role = "system", content = request.systemPrompt),
-                ChatMessage(role = "user", content = "Abaixo está a transcrição bruta do áudio. Por favor, reescreva-a seguindo rigorosamente as instruções do sistema, corrigindo pontuação, gramática, ortografia, quebras de linha e estruturação:\n\n$rawTranscript")
-            )
+                ChatMessage(role = "user", content = strictUserPrompt)
+            ),
+            temperature = 0.1
         )
 
         val chatResponse = try {
@@ -106,11 +228,28 @@ class OpenRouterTranscriptionProvider(
             return Result.failure(IllegalStateException("Erro no pós-processamento do OpenRouter: ${chatResponse.error.message ?: "Erro sem mensagem"}"))
         }
 
-        val processed = chatResponse.choices?.firstOrNull()?.message?.content
-        if (processed.isNullOrBlank()) {
+        val processedRaw = chatResponse.choices?.firstOrNull()?.message?.content
+        if (processedRaw.isNullOrBlank()) {
             return Result.failure(IllegalStateException("O pós-processamento não retornou texto."))
         }
+        val processedTrimmed = processedRaw.trim()
+        if (processedTrimmed.length > finalRawText.length * 1.8 && finalRawText.length > 50) {
+            android.util.Log.w("OpenRouterSTT", "post-processing rejected: length blowup raw=${finalRawText.length} processed=${processedTrimmed.length}")
+            val fallbackClean = com.example.data.SegmentUtils.cleanTranscriptText(processedTrimmed)
+            if (fallbackClean.length > finalRawText.length * 1.6) {
+                return Result.success(TranscriptionResult(text = finalRawText, segments = segments, durationMs = durationMs, language = response.language))
+            }
+        }
+        if (processedTrimmed.length < finalRawText.length * 0.6 && finalRawText.length > 1000) {
+            android.util.Log.w("OpenRouterSTT", "post-processing rejected: truncated raw=${finalRawText.length} processed=${processedTrimmed.length} — LLM resumiu/truncou")
+            return Result.success(TranscriptionResult(text = finalRawText, segments = segments, durationMs = durationMs, language = response.language))
+        }
+        val processed = com.example.data.SegmentUtils.cleanTranscriptText(processedTrimmed)
+        val finalProcessed = if (processed.length < processedTrimmed.length * 0.5 && processedTrimmed.length > 1000) {
+            android.util.Log.w("OpenRouterSTT", "post clean over-pruned, reverting")
+            processedTrimmed
+        } else processed
 
-        return Result.success(TranscriptionResult(text = processed))
+        return Result.success(TranscriptionResult(text = finalProcessed, segments = segments, durationMs = durationMs, language = response.language))
     }
 }

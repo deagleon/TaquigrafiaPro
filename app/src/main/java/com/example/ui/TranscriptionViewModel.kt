@@ -3,6 +3,7 @@ package com.example.ui
 import android.app.Application
 import android.content.Context
 import android.net.Uri
+import android.media.MediaMetadataRetriever
 import android.provider.OpenableColumns
 import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
@@ -72,20 +73,23 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
     private val _selectedModel = MutableStateFlow(sharedPrefs.getString("selected_model", "gemini-3.5-flash") ?: "gemini-3.5-flash")
     val selectedModel: StateFlow<String> = _selectedModel.asStateFlow()
 
-    private val _isOpenRouterPostProcessingEnabled = MutableStateFlow(sharedPrefs.getBoolean("openrouter_post_processing_enabled", true))
+    private val _isOpenRouterPostProcessingEnabled = MutableStateFlow(sharedPrefs.getBoolean("openrouter_post_processing_enabled", false))
     val isOpenRouterPostProcessingEnabled: StateFlow<Boolean> = _isOpenRouterPostProcessingEnabled.asStateFlow()
 
     private val _openRouterPostProcessingModel = MutableStateFlow(sharedPrefs.getString("openrouter_post_processing_model", "nvidia/nemotron-3-ultra-550b-a55b:free") ?: "nvidia/nemotron-3-ultra-550b-a55b:free")
     val openRouterPostProcessingModel: StateFlow<String> = _openRouterPostProcessingModel.asStateFlow()
 
     private val defaultSystemPrompt = """
-        Você é um taquígrafo profissional de plenário de altíssima competência. Sua tarefa é transcrever o áudio fornecido seguindo rigorosamente a norma-padrão da Língua Portuguesa (incluindo pontuação, concordância e ortografia oficial). 
+        Você é um taquígrafo profissional de plenário. Sua tarefa é transcrever o áudio em português brasileiro com norma-padrão absolutamente fiel ao que foi dito.
 
-        IMPORTANTE:
-        1. Formate a transcrição com quebras de linha lógicas e parágrafos estruturados para garantir excelente legibilidade.
-        2. Se houver mais de um orador ou seções claras de debate, indique as mudanças de fala de forma elegante (exemplo: 'Orador 1:', 'Orador 2:' ou '[Intervenção]').
-        3. Preserve toda a formalidade e termos jurídicos/parlamentares típicos de sessões parlamentares.
-        4. Não adicione comentários, resumos ou notas pessoais. Apenas transcreva o áudio de forma fidedigna e formate-o de maneira impecável.
+        REGRAS INEGOCIÁVEIS (VIOLAR = ERRO GRAVE):
+        1. NUNCA invente, complete, parafraseie ou adicione conteúdo que não está no áudio.
+        2. Se um trecho estiver inaudível, sobreposto ou incompreensível, escreva exatamente [inaudível] — não tente adivinhar.
+        3. Transcrição LITERAL: preserve cada palavra dita; corrija APENAS pontuação, ortografia e concordância dentro do dito, sem alterar sentido.
+        4. Quebras de linha lógicas e parágrafos curtos para legibilidade.
+        5. Se houver troca clara de orador, indique "Orador 1:", "Orador 2:" ou "[Intervenção]" apenas quando audível.
+        6. Preserve formalidade parlamentar apenas quando presente no áudio; não insira jargão não dito.
+        7. Não adicione resumos, comentários, explicações ou metatexto. Saída = apenas transcrição.
     """.trimIndent()
 
     private val _systemPrompt = MutableStateFlow(sharedPrefs.getString("system_prompt", defaultSystemPrompt) ?: defaultSystemPrompt)
@@ -174,37 +178,116 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
 
         viewModelScope.launch {
             try {
-                val base64Data = withContext(Dispatchers.IO) {
-                    readUriAsBase64(uri)
-                }
-
-                if (base64Data == null) {
-                    _transcriptionState.value = TranscriptionState.Error("Não foi possível ler o arquivo de áudio selecionado.")
-                    return@launch
-                }
-
-                _transcriptionState.value = TranscriptionState.Transcribing
-
+                val context = getApplication<Application>()
+                val retrieverDurationMs = withContext(Dispatchers.IO) { extractAudioDurationMs(uri) }
+                val needsChunking = com.example.data.AudioChunker.isChunkingNeeded(retrieverDurationMs, fileInfo.size)
                 val provider = providerRegistry.get(_selectedProvider.value)
                 if (provider == null) {
                     _transcriptionState.value = TranscriptionState.Error("Provedor desconhecido: ${_selectedProvider.value}")
                     return@launch
                 }
 
-                val result = withContext(Dispatchers.IO) {
-                    provider.transcribe(
-                        TranscriptionRequest(
-                            audioBase64 = base64Data,
-                            fileInfo = fileInfo,
-                            model = _selectedModel.value,
-                            systemPrompt = _systemPrompt.value
+                _transcriptionState.value = TranscriptionState.Transcribing
+
+                // Função auxiliar para transcrever um único base64 (reutilizável para chunk)
+                suspend fun transcribeSingle(base64: String, fInfo: FileInfo): Result<com.example.data.provider.TranscriptionResult> {
+                    return withContext(Dispatchers.IO) {
+                        provider.transcribe(
+                            TranscriptionRequest(
+                                audioBase64 = base64,
+                                fileInfo = fInfo,
+                                model = _selectedModel.value,
+                                systemPrompt = _systemPrompt.value
+                            )
                         )
-                    )
+                    }
                 }
 
-                val transcriptionResult = result.getOrElse { e ->
-                    _transcriptionState.value = TranscriptionState.Error(e.message ?: "Erro desconhecido na transcrição.")
-                    return@launch
+                val transcriptionResult: com.example.data.provider.TranscriptionResult
+                var mergedDurationMs: Int? = null
+                if (needsChunking) {
+                    android.util.Log.d("TranscriptionVM", "long audio detected dur=${retrieverDurationMs} size=${fileInfo.size} -> chunking")
+                    val chunks = withContext(Dispatchers.IO) {
+                        com.example.data.AudioChunker.splitIfNeeded(context, uri, fileInfo.name, retrieverDurationMs, fileInfo.size)
+                    }
+                    android.util.Log.d("DiagTrunc", "chunks=${chunks.size} starts=${chunks.map{it.startMs}}")
+                    if (chunks.isEmpty()) {
+                        // Fallback single
+                        val base64Data = withContext(Dispatchers.IO) { readUriAsBase64(uri) }
+                            ?: run { _transcriptionState.value = TranscriptionState.Error("Não foi possível ler o arquivo de áudio selecionado."); return@launch }
+                        android.util.Log.d("DiagTrunc", "file=${fileInfo.name} mime=${fileInfo.mimeType} size=${fileInfo.size} durMs=${retrieverDurationMs} needsChunk=${needsChunking} base64Len=${base64Data.length} provider=${_selectedProvider.value} model=${_selectedModel.value}")
+                        val res = transcribeSingle(base64Data, fileInfo)
+                        transcriptionResult = res.getOrElse { e ->
+                            _transcriptionState.value = TranscriptionState.Error(e.message ?: "Erro desconhecido na transcrição.")
+                            return@launch
+                        }
+                        mergedDurationMs = transcriptionResult.durationMs ?: retrieverDurationMs
+                    } else {
+                        val allTexts = mutableListOf<String>()
+                        val allSegments = mutableListOf<com.example.data.api.Segment>()
+                        var totalDurationMs = 0
+                        var failed: Throwable? = null
+                        for ((idx, chunk) in chunks.withIndex()) {
+                            val chunkUri = Uri.fromFile(chunk.file)
+                            val chunkBase64 = withContext(Dispatchers.IO) { readUriAsBase64(chunkUri) }
+                            if (chunkBase64 == null) { failed = IllegalStateException("Falha ao ler chunk ${idx + 1}/${chunks.size}"); break }
+                            android.util.Log.d("DiagTrunc", "file=${fileInfo.name} mime=${fileInfo.mimeType} size=${fileInfo.size} durMs=${retrieverDurationMs} needsChunk=${needsChunking} base64Len=${chunkBase64.length} provider=${_selectedProvider.value} model=${_selectedModel.value} chunk=${idx + 1}/${chunks.size} startMs=${chunk.startMs}")
+                            val chunkFileInfo = FileInfo(chunk.file.name, chunk.file.length(), fileInfo.mimeType)
+                            android.util.Log.d("TranscriptionVM", "transcribing chunk ${idx + 1}/${chunks.size} start=${chunk.startMs} dur=${chunk.durationMs}")
+                            val res = transcribeSingle(chunkBase64, chunkFileInfo)
+                            val chunkResult = res.getOrElse { e ->
+                                failed = e
+                                null
+                            } ?: break
+                            if (chunkResult.text.isNotBlank()) allTexts.add(chunkResult.text.trim())
+                            chunkResult.segments?.let { segs ->
+                                val offsetSec = chunk.startMs / 1000.0
+                                segs.forEach { seg ->
+                                    allSegments.add(seg.copy(start = seg.start + offsetSec, end = seg.end + offsetSec))
+                                }
+                            }
+                            totalDurationMs += chunk.durationMs.toInt()
+                        }
+                        com.example.data.AudioChunker.cleanupChunks(chunks)
+                        val failCopy = failed
+                        if (failCopy != null) {
+                            _transcriptionState.value = TranscriptionState.Error(failCopy.message ?: "Erro na transcrição chunk ${failCopy.localizedMessage}")
+                            return@launch
+                        }
+                        if (allTexts.isEmpty()) {
+                            _transcriptionState.value = TranscriptionState.Error("O provedor não retornou nenhum texto para esta transcrição (chunks).")
+                            return@launch
+                        }
+                        val mergedText = allTexts.joinToString("\n\n")
+                        // Deduplica global após merge (evita repetição na borda do chunk)
+                        val cleanedSegments = com.example.data.SegmentUtils.cleanAndDeduplicate(allSegments.ifEmpty { null })
+                        val mergedCleanText = if (!cleanedSegments.isNullOrEmpty()) {
+                            // Se segmentos existem, texto já é junção dos segmentos limpos; re-deriva para garantir consistência
+                            cleanedSegments.joinToString("\n\n") { it.text.trim() }.ifBlank { mergedText }
+                        } else mergedText
+                        val finalText = com.example.data.SegmentUtils.cleanTranscriptText(mergedCleanText)
+                        android.util.Log.d("DiagTrunc", "mergedTextLen=${finalText.length} segments=${cleanedSegments?.size} words=${finalText.split(Regex("\\s+")).size}")
+                        transcriptionResult = com.example.data.provider.TranscriptionResult(
+                            text = finalText,
+                            segments = cleanedSegments,
+                            durationMs = totalDurationMs.takeIf { it > 500 } ?: retrieverDurationMs,
+                            language = "pt"
+                        )
+                        mergedDurationMs = transcriptionResult.durationMs
+                    }
+                } else {
+                    val base64Data = withContext(Dispatchers.IO) { readUriAsBase64(uri) }
+                    if (base64Data == null) {
+                        _transcriptionState.value = TranscriptionState.Error("Não foi possível ler o arquivo de áudio selecionado.")
+                        return@launch
+                    }
+                    android.util.Log.d("DiagTrunc", "file=${fileInfo.name} mime=${fileInfo.mimeType} size=${fileInfo.size} durMs=${retrieverDurationMs} needsChunk=${needsChunking} base64Len=${base64Data.length} provider=${_selectedProvider.value} model=${_selectedModel.value}")
+                    val res = transcribeSingle(base64Data, fileInfo)
+                    transcriptionResult = res.getOrElse { e ->
+                        _transcriptionState.value = TranscriptionState.Error(e.message ?: "Erro desconhecido na transcrição.")
+                        return@launch
+                    }
+                    mergedDurationMs = transcriptionResult.durationMs
                 }
 
                 val transcriptText = transcriptionResult.text
@@ -223,6 +306,9 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                     } catch (_: Exception) { null }
                 }
 
+                val resolvedDurationMs = mergedDurationMs?.takeIf { it > 500 }
+                    ?: retrieverDurationMs
+
                 val savedAudioUri = withContext(Dispatchers.IO) {
                     saveUriToInternalStorage(uri, fileInfo.name)
                 } ?: uri
@@ -236,7 +322,7 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                     modelUsed = _selectedModel.value,
                     audioUri = savedAudioUri.toString(),
                     segmentsJson = segmentsJson,
-                    audioDurationMs = transcriptionResult.durationMs
+                    audioDurationMs = resolvedDurationMs
                 )
 
                 val id = withContext(Dispatchers.IO) {
@@ -258,6 +344,19 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                 }
             }
         }
+    }
+
+    private fun extractAudioDurationMs(uri: Uri): Int? {
+        return try {
+            val retriever = MediaMetadataRetriever()
+            try {
+                val ctx = getApplication<Application>()
+                retriever.setDataSource(ctx, uri)
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toIntOrNull()?.coerceAtLeast(500)
+            } finally {
+                try { retriever.release() } catch (_: Exception) {}
+            }
+        } catch (_: Exception) { null }
     }
 
     private fun saveUriToInternalStorage(uri: Uri, fileName: String): Uri? {

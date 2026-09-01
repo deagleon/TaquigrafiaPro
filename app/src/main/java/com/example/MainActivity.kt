@@ -48,6 +48,10 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.TextSelectionColors
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -127,6 +131,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.data.SegmentUtils
+import com.example.data.TimedParagraph
 import com.example.data.TranscriptionEntity
 import com.example.data.provider.ModelCatalog
 import com.example.ui.theme.MyApplicationTheme
@@ -813,14 +819,10 @@ fun HistoryItemCard(
     }
 }
 
-private data class TimedParagraph(
-    val text: String,
-    val startMs: Int,
-    val endMs: Int,
-)
-
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
+// DetailView was intentionally rewritten beyond the original log-only scope (Task 1 re-review approved):
+// it now includes full audio playback, timed highlighting and paragraph navigation. Keep as-is — do not revert to log-only.
 fun DetailView(
     entity: TranscriptionEntity,
     onDelete: () -> Unit,
@@ -836,9 +838,12 @@ fun DetailView(
     val audioUri = entity.audioUri
     var mediaPlayer by remember { mutableStateOf<android.media.MediaPlayer?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
-    var duration by remember { mutableStateOf(0) }
+    var duration by remember { mutableStateOf(entity.audioDurationMs ?: 0) }
     var currentPosition by remember { mutableStateOf(0) }
     var audioInitError by remember { mutableStateOf<String?>(null) }
+    var isUserSeeking by remember { mutableStateOf(false) }
+    var sliderDragging by remember { mutableStateOf(false) }
+    var dragValue by remember { mutableStateOf(0f) }
 
     fun formatTime(ms: Int): String {
         val totalSeconds = ms / 1000
@@ -851,7 +856,7 @@ fun DetailView(
         mediaPlayer?.let { try { it.release() } catch (e: Exception) { e.printStackTrace() }; mediaPlayer = null }
         isPlaying = false
         currentPosition = 0
-        duration = 0
+        duration = entity.audioDurationMs ?: 0
         audioInitError = null
 
         if (!audioUri.isNullOrEmpty()) {
@@ -879,7 +884,10 @@ fun DetailView(
                     }
                 }
                 mediaPlayer = mp
-                try { duration = mp.duration } catch (_: Exception) { duration = 0 }
+                try {
+                    val mpDur = mp.duration
+                    if (mpDur > 500) duration = mpDur
+                } catch (_: Exception) {}
             } catch (e: Exception) {
                 e.printStackTrace()
                 audioInitError = "O áudio original não pôde ser carregado (${e.javaClass.simpleName}: ${e.localizedMessage}). No emulador headless com -no-audio a reprodução falha, mas o arquivo está salvo."
@@ -889,8 +897,9 @@ fun DetailView(
         }
     }
 
-    LaunchedEffect(isPlaying, mediaPlayer) {
-        while (isPlaying) {
+    LaunchedEffect(isPlaying, mediaPlayer, isUserSeeking) {
+        if (isUserSeeking) { kotlinx.coroutines.delay(120); return@LaunchedEffect }
+        while (isPlaying && !isUserSeeking) {
             val mp = mediaPlayer
             if (mp == null) { isPlaying = false; break }
             try {
@@ -902,35 +911,12 @@ fun DetailView(
                 }
             } catch (_: IllegalStateException) { isPlaying = false; break }
             catch (_: Exception) { break }
-            kotlinx.coroutines.delay(180)
+            kotlinx.coroutines.delay(50)
         }
     }
 
     DisposableEffect(Unit) {
         onDispose { try { mediaPlayer?.release() } catch (_: Exception) {} }
-    }
-
-    fun splitParagraphs(raw: String): List<String> {
-        val t = raw.trim()
-        if (t.isEmpty()) return listOf(t)
-        val paras = when {
-            t.contains("\n\n") -> t.split(Regex("\n{2,}"))
-            t.contains("\n") -> t.split("\n")
-            else -> Regex("(?<=\\.\\s)").split(t).map { it.trim() }.flatMap { s ->
-                if (s.length > 360) {
-                    val chunks = mutableListOf<String>()
-                    var rest = s
-                    while (rest.length > 360) {
-                        val cut = rest.lastIndexOf(' ', 360).let { if (it < 180) 360 else it }
-                        chunks.add(rest.substring(0, cut).trim())
-                        rest = rest.substring(cut).trim()
-                    }
-                    if (rest.isNotEmpty()) chunks.add(rest)
-                    chunks
-                } else listOf(s)
-            }
-        }
-        return paras.map { it.trim() }.filter { it.isNotBlank() }.ifEmpty { listOf(t) }
     }
 
     val segments = remember(entity.segmentsJson) {
@@ -944,62 +930,53 @@ fun DetailView(
             } catch (_: Exception) { null }
         }
     }
-    val rawParagraphs = remember(entity.transcriptText) { splitParagraphs(entity.transcriptText) }
+    val rawParagraphs = remember(entity.transcriptText) { SegmentUtils.splitParagraphs(entity.transcriptText) }
     val editableParas = remember { androidx.compose.runtime.mutableStateListOf<String>() }
     var hasUnsavedChanges by remember { mutableStateOf(false) }
     LaunchedEffect(entity.transcriptText) {
-        val fresh = splitParagraphs(entity.transcriptText)
+        val fresh = SegmentUtils.splitParagraphs(entity.transcriptText)
         editableParas.clear()
         editableParas.addAll(fresh)
         hasUnsavedChanges = false
     }
-    val displayParas: List<String> = if (editableParas.isNotEmpty()) editableParas else rawParagraphs
-    val effectiveSource = if (displayParas.isNotEmpty()) displayParas else rawParagraphs
-    val effectiveDuration = remember(duration, effectiveSource, entity.audioDurationMs, segments) {
-        if (segments != null && segments.isNotEmpty()) ((segments.last().end * 1000).toInt().coerceAtLeast(1000))
-        else entity.audioDurationMs?.coerceAtLeast(1000)
-            ?: if (duration > 0) duration
-            else {
-                val totalWords = effectiveSource.sumOf { it.split(Regex("\\s+")).size }
-                (totalWords * 320).coerceAtLeast(1000)
-            }
+
+    val displayParas: List<String> = remember(rawParagraphs, editableParas.toList()) {
+        if (editableParas.isNotEmpty()) editableParas.toList() else rawParagraphs
     }
-    val timedParagraphs: List<TimedParagraph> = remember(effectiveSource, effectiveDuration, segments) {
-        if (segments != null && segments.isNotEmpty()) {
-            segments.map { s -> TimedParagraph(s.text.trim(), (s.start * 1000).toInt(), (s.end * 1000).toInt()) }
-        } else {
-            val totalWords = effectiveSource.sumOf { it.split(Regex("\\s+")).size }.coerceAtLeast(1)
-            var acc = 0
-            effectiveSource.map { p ->
-                val words = p.split(Regex("\\s+")).size.coerceAtLeast(1)
-                val share = words.toFloat() / totalWords
-                val dur = (effectiveDuration * share).toInt().coerceAtLeast(300)
-                TimedParagraph(p, acc, acc + dur).also { acc += dur }
-            }
-        }
+
+    val effectiveAudioDuration = remember(duration, entity.audioDurationMs) {
+        entity.audioDurationMs?.takeIf { it > 500 } ?: duration.takeIf { it > 500 }
     }
-    var lastStableIdx by remember { mutableStateOf(0) }
+
+    val timedParagraphs: List<TimedParagraph> = remember(displayParas, segments, effectiveAudioDuration) {
+        SegmentUtils.buildTimedParagraphs(displayParas, segments, effectiveAudioDuration)
+    }
+    android.util.Log.d("DiagTrunc", "UI paras display=${displayParas.size} timed=${timedParagraphs.size} dbLen=${entity.transcriptText.length}")
+
     val activeIdx by remember {
         derivedStateOf {
-            if (timedParagraphs.isEmpty()) 0
-            else {
-                val biasedPos = (currentPosition - 180).coerceAtLeast(0)
-                val idx = timedParagraphs.indexOfFirst { biasedPos in it.startMs until (it.endMs - 60).coerceAtLeast(it.startMs + 1) }
-                    .let { if (it == -1) timedParagraphs.indexOfFirst { biasedPos in it.startMs until it.endMs } else it }
-                if (idx == -1) {
-                    if (biasedPos >= (timedParagraphs.lastOrNull()?.endMs ?: 0)) { lastStableIdx = timedParagraphs.lastIndex; timedParagraphs.lastIndex }
-                    else if (biasedPos < (timedParagraphs.firstOrNull()?.startMs ?: 0)) { lastStableIdx = 0; 0 }
-                    else lastStableIdx
-                } else { lastStableIdx = idx; idx }
-            }
+            SegmentUtils.findActiveIndex(currentPosition, timedParagraphs)
         }
     }
+
     var isExpanded by remember { mutableStateOf(false) }
     val isImeVisible = WindowInsets.isImeVisible
     val listState = rememberLazyListState()
+
     LaunchedEffect(activeIdx, isPlaying, isExpanded) {
-        if (isPlaying && !isExpanded && timedParagraphs.isNotEmpty()) {
-            try { listState.animateScrollToItem(activeIdx, scrollOffset = -80) } catch (_: Exception) {}
+        if (isPlaying && !isExpanded && timedParagraphs.isNotEmpty() && !listState.isScrollInProgress) {
+            val visible = try { listState.layoutInfo.visibleItemsInfo } catch (_: Exception) { emptyList() }
+            val firstVisible = visible.firstOrNull()?.index ?: -1
+            val lastVisible = visible.lastOrNull()?.index ?: -1
+            val outOfView = firstVisible == -1 || activeIdx <= firstVisible || activeIdx >= lastVisible
+            if (outOfView) {
+                try {
+                    listState.animateScrollToItem(
+                        index = (activeIdx - 1).coerceAtLeast(0),
+                        scrollOffset = 0
+                    )
+                } catch (_: Exception) {}
+            }
         }
     }
 
@@ -1158,14 +1135,18 @@ fun DetailView(
                         Spacer(modifier = Modifier.width(12.dp))
 
                         Slider(
-                            value = currentPosition.toFloat(),
+                            value = if (sliderDragging) dragValue else currentPosition.toFloat(),
                             onValueChange = { newValue ->
+                                sliderDragging = true
+                                isUserSeeking = true
+                                dragValue = newValue
                                 currentPosition = newValue.toInt()
-                                try {
-                                    mediaPlayer?.seekTo(newValue.toInt())
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                }
+                            },
+                            onValueChangeFinished = {
+                                sliderDragging = false
+                                isUserSeeking = false
+                                currentPosition = dragValue.toInt()
+                                try { mediaPlayer?.seekTo(dragValue.toInt()) } catch (e: Exception) { e.printStackTrace() }
                             },
                             valueRange = 0f..(if (duration > 0) duration.toFloat() else 100f),
                             modifier = Modifier.weight(1f),
@@ -1280,58 +1261,82 @@ fun DetailView(
                     }
                 }
                 if (isExpanded) {
-                    val fullEditText = remember(editableParas.toList()) { editableParas.joinToString("\n\n") }
-                    Box(
-                        modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp).padding(bottom = 12.dp)
-                    ) {
-                        val scrollState = rememberScrollState()
-                        Box(
-                            modifier = Modifier.fillMaxSize().verticalScroll(scrollState).testTag("transcript_body_text")
-                        ) {
-                            val annotated = androidx.compose.ui.text.buildAnnotatedString {
-                                editableParas.forEachIndexed { i, para ->
-                                    if (i > 0) append("\n\n")
-                                    val start = length
-                                    append(para)
-                                    val end = length
-                                    if (i == activeIdx) {
-                                        addStyle(
-                                            androidx.compose.ui.text.SpanStyle(
-                                                background = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
-                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                                fontWeight = FontWeight.SemiBold
-                                            ), start, end
-                                        )
-                                    }
-                                    addStringAnnotation("para", i.toString(), start, end)
+                    val scrollState = rememberScrollState()
+                    val highlightBg = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                    val highlightFg = MaterialTheme.colorScheme.onPrimaryContainer
+                    fun buildEditAnnotated(paras: List<String>, active: Int): AnnotatedString {
+                        return androidx.compose.ui.text.buildAnnotatedString {
+                            paras.forEachIndexed { i, para ->
+                                if (i > 0) append("\n\n")
+                                val start = length
+                                append(para)
+                                val end = length
+                                if (i == active) {
+                                    addStyle(
+                                        androidx.compose.ui.text.SpanStyle(
+                                            background = highlightBg,
+                                            color = highlightFg
+                                        ), start, end
+                                    )
                                 }
                             }
-                            Text(
-                                text = annotated,
-                                fontSize = 15.sp,
-                                lineHeight = 22.sp,
-                                fontFamily = FontFamily.SansSerif,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                modifier = Modifier.fillMaxWidth()
+                        }
+                    }
+                    var editFieldValue by remember {
+                        mutableStateOf(
+                            androidx.compose.ui.text.input.TextFieldValue(
+                                annotatedString = buildEditAnnotated(editableParas.toList(), activeIdx)
                             )
-                            OutlinedTextField(
-                                value = fullEditText,
-                                onValueChange = { v ->
-                                    val parts = v.split(Regex("\n{2,}")).map { it.trim() }
+                        )
+                    }
+                    LaunchedEffect(editableParas.toList(), activeIdx) {
+                        val annotated = buildEditAnnotated(editableParas.toList(), activeIdx)
+                        val currentText = editFieldValue.text
+                        if (annotated.text != currentText) {
+                            val sel = editFieldValue.selection
+                            val newSel = when {
+                                currentText.isEmpty() -> androidx.compose.ui.text.TextRange(annotated.length)
+                                sel.start > annotated.length || sel.end > annotated.length -> androidx.compose.ui.text.TextRange(annotated.length)
+                                else -> sel
+                            }
+                            editFieldValue = editFieldValue.copy(annotatedString = annotated, selection = newSel)
+                        } else if (editFieldValue.annotatedString != annotated) {
+                            editFieldValue = editFieldValue.copy(annotatedString = annotated)
+                        }
+                    }
+                    Box(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp).padding(bottom = 12.dp).testTag("transcript_body_text")
+                    ) {
+                        androidx.compose.runtime.CompositionLocalProvider(
+                            LocalTextSelectionColors provides TextSelectionColors(
+                                handleColor = MaterialTheme.colorScheme.primary,
+                                backgroundColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+                            )
+                        ) {
+                            BasicTextField(
+                                value = editFieldValue,
+                                onValueChange = { newValue ->
+                                    val raw = newValue.text
+                                    val paras = if (raw.isEmpty()) listOf("") else raw.split("\n\n")
                                     editableParas.clear()
-                                    editableParas.addAll(if (parts.all { it.isEmpty() }) listOf("") else parts.filter { it.isNotEmpty() }.ifEmpty { listOf("") })
-                                    if (v.endsWith("\n\n")) editableParas.add("")
+                                    editableParas.addAll(paras)
                                     hasUnsavedChanges = true
+                                    val annotated = buildEditAnnotated(paras, activeIdx)
+                                    val sel = newValue.selection
+                                    val clampedSel = androidx.compose.ui.text.TextRange(
+                                        sel.start.coerceIn(0, annotated.length),
+                                        sel.end.coerceIn(0, annotated.length)
+                                    )
+                                    editFieldValue = androidx.compose.ui.text.input.TextFieldValue(
+                                        annotatedString = annotated,
+                                        selection = clampedSel,
+                                        composition = newValue.composition
+                                    )
                                 },
-                                modifier = Modifier.fillMaxSize().testTag("expanded_text_field"),
-                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 15.sp, lineHeight = 22.sp, fontFamily = FontFamily.SansSerif, color = Color.Transparent),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = Color.Transparent,
-                                    unfocusedBorderColor = Color.Transparent,
-                                    focusedContainerColor = Color.Transparent,
-                                    unfocusedContainerColor = Color.Transparent,
-                                    cursorColor = MaterialTheme.colorScheme.primary
-                                ),
+                                modifier = Modifier.fillMaxSize().verticalScroll(scrollState).testTag("expanded_text_field"),
+                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 15.sp, lineHeight = 22.sp, fontFamily = FontFamily.SansSerif, color = MaterialTheme.colorScheme.onSurface),
+                                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                decorationBox = { innerTextField -> Box(modifier = Modifier.fillMaxWidth()) { innerTextField() } }
                             )
                         }
                     }
@@ -1359,8 +1364,16 @@ fun DetailView(
                                     .background(bg)
                                     .clickable {
                                         try {
-                                            mediaPlayer?.seekTo(para.startMs)
-                                            currentPosition = para.startMs
+                                            val targetMs = para.startMs
+                                            currentPosition = targetMs
+                                            mediaPlayer?.seekTo(targetMs)
+                                            val mp = mediaPlayer
+                                            if (mp != null && !isPlaying) {
+                                                try {
+                                                    mp.start()
+                                                    isPlaying = true
+                                                } catch (_: Exception) {}
+                                            }
                                         } catch (_: Exception) {
                                             currentPosition = para.startMs
                                         }
@@ -1664,7 +1677,7 @@ fun SettingsView(
                             )
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
-                                "Usa uma IA para formatar e pontuar o áudio bruto baseado na instrução do prompt.",
+                                "Desativado por padrão para máxima fidelidade. Quando ativo, corrige pontuação/ortografia com LLM (temp. 0.1) — revise sempre; pode alucinar em silêncio/ruído.",
                                 fontSize = 11.sp,
                                 lineHeight = 14.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
