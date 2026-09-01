@@ -70,22 +70,39 @@ object SegmentUtils {
                 i++
             }
         }
-
-        // Pass 3: Tail hallucination — se cauda repete frase única muitas vezes fora do ciclo acima,
-        // já foi colapsada por Pass1; mas se houver cauda inventada não-repetitiva, não há o que filtrar aqui.
-        // Mantemos pass2 como resultado.
+        // Pass 3: gap>5s with short text (<20) and 4-gram >3x hallucination filter
+        // Para gpt-4o-mini-transcribe sem confidence/no_speech_prob: heurística de silêncio
+        // e repetição lexical via 4-gram. Só filtra texto curto para evitar falso-positivo
+        // em conteúdo legítimo como "Projeto 1" vs "Projeto 2".
+        val globalCounts = fourGramCountsSegments(pass2)
+        val pass3 = mutableListOf<Segment>()
+        for (seg in pass2) {
+            val prev = pass3.lastOrNull()
+            val gap = if (prev != null) seg.start - prev.end else 0.0
+            val trimmedLen = seg.text.trim().length
+            val short = trimmedLen < 20
+            val gapHalluc = short && gap > 5.0
+            val ngramHalluc = short && hasRepeatedFourGram(seg, globalCounts)
+            if (gapHalluc || ngramHalluc) {
+                android.util.Log.d("SegmentUtils", "filter halluc gap=$gap short=$short ngram=$ngramHalluc text=${seg.text.take(30)}")
+                continue
+            }
+            pass3.add(seg)
+        }
         // Guard: if dedup collapsed >60% of long transcript, it's likely a false-positive (e.g. 5:26 video 60->10)
         // → revert to Pass1 (adjacent dedup only) to preserve legitimate content
-        if (valid.size > 30 && pass2.size < valid.size * 0.4) {
-            android.util.Log.w("OpenRouterSTT", "segment over-pruned raw=${valid.size} cleaned=${pass2.size}, reverting to Pass1")
+        val candidate = if (pass3.isEmpty() && pass2.isNotEmpty()) pass2 else pass3
+        if (valid.size > 30 && candidate.size < valid.size * 0.4) {
+            android.util.Log.w("OpenRouterSTT", "segment over-pruned raw=${valid.size} cleaned=${candidate.size}, reverting to Pass1")
             return pass1.ifEmpty { null }
         }
-        return pass2.ifEmpty { null }
+        return candidate.ifEmpty { null }
     }
 
     /**
      * Pass 1 adjacent deduplication — extracted so OpenRouter provider reuses the same logic
      * instead of duplicating Regex normalization per segment.
+     * Uses paraphrased detection: exact normalized equality OR Levenshtein <=2 for <40 chars.
      */
     fun pass1AdjacentDedup(valid: List<Segment>): List<Segment> {
         val pass1 = mutableListOf<Segment>()
@@ -95,7 +112,7 @@ object SegmentUtils {
             if (normalized.isEmpty()) continue
 
             val last = pass1.lastOrNull()
-            if (last != null && normalizeForComparison(last.text) == normalized) {
+            if (last != null && isParaphrased(last.text, text)) {
                 continue
             }
             pass1.add(seg.copy(text = text))
@@ -103,6 +120,83 @@ object SegmentUtils {
         return pass1
     }
 
+    private fun levenshtein(a: String, b: String): Int {
+        if (a == b) return 0
+        if (a.isEmpty()) return b.length
+        if (b.isEmpty()) return a.length
+        val prev = IntArray(b.length + 1) { it }
+        val curr = IntArray(b.length + 1)
+        for (i in 1..a.length) {
+            curr[0] = i
+            for (j in 1..b.length) {
+                val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+                curr[j] = minOf(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+            }
+            for (j in 0..b.length) prev[j] = curr[j]
+        }
+        return prev[b.length]
+    }
+
+    private fun isParaphrased(a: String, b: String): Boolean {
+        val na = normalizeForComparison(a)
+        val nb = normalizeForComparison(b)
+        if (na == nb) return true
+        if (na.length < 40 && nb.length < 40 && levenshtein(na, nb) <= 2) {
+            // Avoid collapsing legit numeric enumerations like "Projeto 1" vs "Projeto 2"
+            // (distance 1) or "Frase única 1 ..." vs "Frase única 2 ..." (distance 2):
+            // if stripping digits makes them equal, the difference is numeric-only.
+            val naNoDigits = na.replace(Regex("\\d+"), " ").replace(Regex("\\s+"), " ").trim()
+            val nbNoDigits = nb.replace(Regex("\\d+"), " ").replace(Regex("\\s+"), " ").trim()
+            if (naNoDigits == nbNoDigits) return false
+            return true
+        }
+        return false
+    }
+    private fun fourGramCountsSegments(segments: List<Segment>): Map<String, Int> {
+        val counts = mutableMapOf<String, Int>()
+        for (seg in segments) {
+            val words = normalizeForComparison(seg.text).split(Regex("\\s+")).filter { it.isNotEmpty() }
+            if (words.size < 4) continue
+            for (idx in 0..words.size - 4) {
+                val gram = words.subList(idx, idx + 4).joinToString(" ")
+                counts[gram] = (counts[gram] ?: 0) + 1
+            }
+        }
+        return counts
+    }
+
+    private fun hasRepeatedFourGram(seg: Segment, counts: Map<String, Int>): Boolean {
+        val words = normalizeForComparison(seg.text).split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (words.size < 4) return false
+        for (idx in 0..words.size - 4) {
+            val gram = words.subList(idx, idx + 4).joinToString(" ")
+            if ((counts[gram] ?: 0) > 3) return true
+        }
+        return false
+    }
+
+    private fun fourGramCountsParas(paras: List<String>): Map<String, Int> {
+        val counts = mutableMapOf<String, Int>()
+        for (p in paras) {
+            val words = normalizeForComparison(p).split(Regex("\\s+")).filter { it.isNotEmpty() }
+            if (words.size < 4) continue
+            for (idx in 0..words.size - 4) {
+                val gram = words.subList(idx, idx + 4).joinToString(" ")
+                counts[gram] = (counts[gram] ?: 0) + 1
+            }
+        }
+        return counts
+    }
+
+    private fun hasRepeatedFourGramPara(para: String, counts: Map<String, Int>): Boolean {
+        val words = normalizeForComparison(para).split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (words.size < 4) return false
+        for (idx in 0..words.size - 4) {
+            val gram = words.subList(idx, idx + 4).joinToString(" ")
+            if ((counts[gram] ?: 0) > 3) return true
+        }
+        return false
+    }
     /**
      * Limpa texto puro (Gemini ou fallback sem segments) removendo alucinação textual:
      * - parágrafos consecutivos duplicados
@@ -120,13 +214,13 @@ object SegmentUtils {
             else -> splitParagraphs(trimmed)
         }.ifEmpty { return trimmed }
 
-        // Pass A: remove duplicatas consecutivas (exato normalizado)
+        // Pass A: remove duplicatas consecutivas (paraphrased: exact ou Levenshtein <=2 para <40 chars)
         val deduped = mutableListOf<String>()
         for (p in paras) {
             val norm = normalizeForComparison(p)
             if (norm.isEmpty()) continue
-            val lastNorm = deduped.lastOrNull()?.let { normalizeForComparison(it) }
-            if (lastNorm == norm) continue
+            val last = deduped.lastOrNull()
+            if (last != null && isParaphrased(last, p)) continue
             deduped.add(p)
         }
         if (deduped.size < 4) {
@@ -158,7 +252,31 @@ object SegmentUtils {
                 out.add(deduped[idx]); idx++
             }
         }
-        val result = out.joinToString("\n\n")
+        // 4-gram >3x filtering for short paras — only for paraphrased hallucination,
+        // keeps first occurrence and filters subsequent duplicates with same repeated 4-gram
+        val globalCounts = fourGramCountsParas(paras)
+        val filtered = mutableListOf<String>()
+        val keptGrams = mutableSetOf<String>()
+        for (para in out) {
+            if (para.trim().length < 40 && hasRepeatedFourGramPara(para, globalCounts)) {
+                val words = normalizeForComparison(para).split(Regex("\\s+")).filter { it.isNotEmpty() }
+                var isDup = false
+                for (w in 0..words.size - 4) {
+                    val gram = words.subList(w, w + 4).joinToString(" ")
+                    if ((globalCounts[gram] ?: 0) > 3 && keptGrams.contains(gram)) { isDup = true; break }
+                }
+                if (isDup) {
+                    android.util.Log.d("SegmentUtils", "filter 4-gram para=${para.take(30)}")
+                    continue
+                }
+                for (w in 0..words.size - 4) {
+                    val gram = words.subList(w, w + 4).joinToString(" ")
+                    if ((globalCounts[gram] ?: 0) > 3) keptGrams.add(gram)
+                }
+            }
+            filtered.add(para)
+        }
+        val result = filtered.joinToString("\n\n")
         android.util.Log.d("DiagTrunc", "clean in=${trimmed.length} out=${result.length} paras in=${paras.size} out=${result.split(Regex("\n\n")).size}")
         return result
     }

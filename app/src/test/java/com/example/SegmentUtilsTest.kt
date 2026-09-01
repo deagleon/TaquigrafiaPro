@@ -63,6 +63,16 @@ class SegmentUtilsTest {
     }
 
     @Test
+    fun `paraphrased repetition collapses`() {
+        val raw = listOf(
+            Segment(1, 0, 0.0, 2.0, "Vereadora A vota sim."),
+            Segment(2, 0, 2.0, 4.0, "Vereadora A votou sim")
+        )
+        val cleaned = SegmentUtils.cleanAndDeduplicate(raw)
+        assertEquals(1, cleaned!!.size)
+    }
+
+    @Test
     fun `test findActiveIndex with direct hit, pause gap and boundaries`() {
         val timed = listOf(
             TimedParagraph("Parágrafo 1", 0, 3000),      // 0 - 3s
