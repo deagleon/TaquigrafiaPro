@@ -32,7 +32,8 @@ data class GenerationConfig(
     val temperature: Float? = null,
     val topP: Float? = null,
     val topK: Int? = null,
-    val responseMimeType: String? = null
+    val responseMimeType: String? = null,
+    val maxOutputTokens: Int? = null
 )
 
 @JsonClass(generateAdapter = true)

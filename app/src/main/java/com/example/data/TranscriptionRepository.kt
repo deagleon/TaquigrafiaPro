@@ -26,6 +26,10 @@ class TranscriptionRepository(private val transcriptionDao: TranscriptionDao) {
     }
 
     suspend fun updateTranscriptText(id: Int, text: String) {
-        transcriptionDao.updateTranscriptText(id, text)
+        updateTranscriptTextAndInvalidateTimestamps(id, text)
+    }
+
+    suspend fun updateTranscriptTextAndInvalidateTimestamps(id: Int, text: String) {
+        transcriptionDao.updateTranscriptTextAndInvalidateTimestamps(id, text)
     }
 }

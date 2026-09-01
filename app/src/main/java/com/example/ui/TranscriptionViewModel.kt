@@ -181,7 +181,6 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                 val context = getApplication<Application>()
                 val retrieverDurationMs = withContext(Dispatchers.IO) { extractAudioDurationMs(uri) }
                 val needsChunking = com.example.data.AudioChunker.isChunkingNeeded(retrieverDurationMs, fileInfo.size)
-                android.util.Log.d("DiagTrunc", "file=${fileInfo.name} mime=${fileInfo.mimeType} size=${fileInfo.size} durMs=${retrieverDurationMs} needsChunk=${needsChunking} base64Len=0 provider=${_selectedProvider.value} model=${_selectedModel.value}")
                 val provider = providerRegistry.get(_selectedProvider.value)
                 if (provider == null) {
                     _transcriptionState.value = TranscriptionState.Error("Provedor desconhecido: ${_selectedProvider.value}")

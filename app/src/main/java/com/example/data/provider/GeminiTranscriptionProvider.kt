@@ -23,17 +23,19 @@ class GeminiTranscriptionProvider(
         val activeKey = apiKeyResolver.geminiKey()
             ?: return Result.failure(IllegalStateException("Chave de API do Gemini não configurada. Por favor, insira sua chave nas Configurações (ícone de engrenagem no topo)."))
 
+        // Estimativa: ~5 tokens/seg para pt-BR, 26min ~7800 tokens + prompt → precisa 16384
+        val estimatedTokens = (request.fileInfo.size / 1024).coerceAtLeast(2048) // fallback por tamanho
         val apiRequest = GenerateContentRequest(
             contents = listOf(
                 Content(
                     parts = listOf(
                         Part(inlineData = InlineData(mimeType = request.fileInfo.mimeType, data = request.audioBase64)),
-                        Part(text = "Transcreva o áudio acima seguindo rigorosamente as instruções do sistema.")
+                        Part(text = "Transcreva o áudio acima seguindo RIGOROSAMENTE as instruções do sistema. Seja literal, não invente. Se inaudível, marque [inaudível]. NÃO resuma, NÃO truncue, transcreva do início ao fim.")
                     )
                 )
             ),
             systemInstruction = Content(parts = listOf(Part(text = request.systemPrompt))),
-            generationConfig = GenerationConfig(temperature = 0.2f)
+            generationConfig = GenerationConfig(temperature = 0.1f, maxOutputTokens = 16384)
         )
 
         val response = try {
@@ -51,10 +53,12 @@ class GeminiTranscriptionProvider(
             throw e
         }
 
-        val text = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
-        if (text.isNullOrBlank()) {
+        val rawText = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
+        if (rawText.isNullOrBlank()) {
             return Result.failure(IllegalStateException("O provedor não retornou nenhum texto para esta transcrição."))
         }
-        return Result.success(TranscriptionResult(text = text))
+        // Barreira anti-alucinação textual idêntica ao OpenRouter
+        val cleaned = com.example.data.SegmentUtils.cleanTranscriptText(rawText.trim())
+        return Result.success(TranscriptionResult(text = cleaned))
     }
 }

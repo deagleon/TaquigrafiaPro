@@ -7,6 +7,9 @@ import com.squareup.moshi.JsonClass
 data class OpenRouterTranscriptionRequest(
     @Json(name = "model") val model: String,
     @Json(name = "input_audio") val inputAudio: InputAudio,
+    @Json(name = "language") val language: String? = "pt",
+    @Json(name = "temperature") val temperature: Double? = 0.0,
+    @Json(name = "prompt") val prompt: String? = null,
     @Json(name = "response_format") val responseFormat: String? = null,
     @Json(name = "timestamp_granularities") val timestampGranularities: List<String>? = null,
 )
@@ -54,7 +57,9 @@ data class OpenRouterError(
 @JsonClass(generateAdapter = true)
 data class OpenRouterChatCompletionRequest(
     @Json(name = "model") val model: String,
-    @Json(name = "messages") val messages: List<ChatMessage>
+    @Json(name = "messages") val messages: List<ChatMessage>,
+    @Json(name = "temperature") val temperature: Double? = 0.1,
+    @Json(name = "max_tokens") val maxTokens: Int? = 16384
 )
 
 @JsonClass(generateAdapter = true)

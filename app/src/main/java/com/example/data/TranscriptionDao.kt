@@ -29,4 +29,7 @@ interface TranscriptionDao {
 
     @Query("UPDATE transcriptions SET transcriptText = :newText WHERE id = :id")
     suspend fun updateTranscriptText(id: Int, newText: String)
+
+    @Query("UPDATE transcriptions SET transcriptText = :newText, segmentsJson = NULL WHERE id = :id")
+    suspend fun updateTranscriptTextAndInvalidateTimestamps(id: Int, newText: String)
 }
