@@ -38,9 +38,13 @@ class OpenRouterTranscriptionProvider(
         val authHeader = "Bearer $activeKey"
         val wantsTimestamps = prefs.getBoolean("openrouter_timestamps_enabled", true)
         val supportsVerbose = request.model.lowercase().let { m ->
-            "whisper" in m || "gpt-4o-transcribe" in m || "gpt-transcribe" in m || "chirp" in m
+            "whisper" in m || "gpt-4o-mini-transcribe" in m || "gpt-4o-transcribe" in m || "gpt-transcribe" in m || "chirp" in m
         }
         val useVerbose = wantsTimestamps && supportsVerbose
+        val base64Len = request.audioBase64.length
+        if (base64Len > 25 * 1024 * 1024) {
+            android.util.Log.w("OpenRouterSTT", "payload oversize base64Len=$base64Len >25MB, will rely on chunking")
+        }
 
         suspend fun doTranscribe(
             responseFormat: String?,
