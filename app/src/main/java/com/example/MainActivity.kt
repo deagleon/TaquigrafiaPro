@@ -184,6 +184,8 @@ fun MainAppScreen() {
     val systemPrompt by viewModel.systemPrompt.collectAsState()
     val isOpenRouterPostProcessingEnabled by viewModel.isOpenRouterPostProcessingEnabled.collectAsState()
     val openRouterPostProcessingModel by viewModel.openRouterPostProcessingModel.collectAsState()
+    val hallucinationAggressive by viewModel.hallucinationAggressive.collectAsState()
+    val hallucinationThreshold by viewModel.hallucinationThreshold.collectAsState()
 
     // File selection launcher
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -305,8 +307,10 @@ fun MainAppScreen() {
                         systemPrompt = systemPrompt,
                         openRouterPostProcessingEnabled = isOpenRouterPostProcessingEnabled,
                         openRouterPostProcessingModel = openRouterPostProcessingModel,
-                        onSave = { provider, key, openRouterKey, model, prompt, postEnabled, postModel ->
-                            viewModel.saveSettings(provider, key, openRouterKey, model, prompt, postEnabled, postModel)
+                        hallucinationAggressive = hallucinationAggressive,
+                        hallucinationThreshold = hallucinationThreshold,
+                        onSave = { provider, key, openRouterKey, model, prompt, postEnabled, postModel, hallucAggressive, hallucThreshold ->
+                            viewModel.saveSettings(provider, key, openRouterKey, model, prompt, postEnabled, postModel, hallucAggressive, hallucThreshold)
                             currentScreen = Screen.Dashboard
                             Toast.makeText(context, "Configurações salvas!", Toast.LENGTH_SHORT).show()
                         },
@@ -1401,7 +1405,9 @@ fun SettingsView(
     systemPrompt: String,
     openRouterPostProcessingEnabled: Boolean,
     openRouterPostProcessingModel: String,
-    onSave: (String, String, String, String, String, Boolean, String) -> Unit,
+    hallucinationAggressive: Boolean,
+    hallucinationThreshold: Float,
+    onSave: (String, String, String, String, String, Boolean, String, Boolean, Float) -> Unit,
     onRestorePrompt: () -> Unit
 ) {
     var providerState by remember { mutableStateOf(provider) }
@@ -1411,6 +1417,8 @@ fun SettingsView(
     var promptState by remember { mutableStateOf(systemPrompt) }
     var openRouterPostProcessingEnabledState by remember { mutableStateOf(openRouterPostProcessingEnabled) }
     var openRouterPostProcessingModelState by remember { mutableStateOf(openRouterPostProcessingModel) }
+    var hallucinationAggressiveState by remember { mutableStateOf(hallucinationAggressive) }
+    var hallucinationThresholdState by remember { mutableStateOf(hallucinationThreshold.coerceIn(0.4f, 0.6f)) }
     
     var showGeminiKey by remember { mutableStateOf(false) }
     var showOpenRouterKey by remember { mutableStateOf(false) }
@@ -1418,7 +1426,7 @@ fun SettingsView(
     val scrollState = rememberScrollState()
 
     // Sync state if values change from viewmodel callbacks
-    LaunchedEffect(provider, apiKey, openRouterApiKey, selectedModel, systemPrompt, openRouterPostProcessingEnabled, openRouterPostProcessingModel) {
+    LaunchedEffect(provider, apiKey, openRouterApiKey, selectedModel, systemPrompt, openRouterPostProcessingEnabled, openRouterPostProcessingModel, hallucinationAggressive, hallucinationThreshold) {
         providerState = provider
         keyState = apiKey
         openRouterKeyState = openRouterApiKey
@@ -1426,7 +1434,10 @@ fun SettingsView(
         promptState = systemPrompt
         openRouterPostProcessingEnabledState = openRouterPostProcessingEnabled
         openRouterPostProcessingModelState = openRouterPostProcessingModel
+        hallucinationAggressiveState = hallucinationAggressive
+        hallucinationThresholdState = hallucinationThreshold.coerceIn(0.4f, 0.6f)
     }
+
 
     Column(
         modifier = Modifier
@@ -1733,6 +1744,65 @@ fun SettingsView(
             }
         }
 
+        // Hallucination Control Card — Limpeza Anti-Alucinação
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 600.dp)
+                .testTag("hallucination_card"),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "Limpeza Anti-Alucinação",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            if (hallucinationAggressiveState) "Agressivo: remove repetições parafraseadas (Levenshtein ≤2) e ciclos longos (k=2..12)" else "Conservador: remove apenas repetições exatas (k=2..8)",
+                            fontSize = 11.sp,
+                            lineHeight = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                    }
+                    Switch(
+                        checked = hallucinationAggressiveState,
+                        onCheckedChange = { hallucinationAggressiveState = it },
+                        modifier = Modifier.testTag("hallucination_aggressive_switch")
+                    )
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "Sensibilidade (threshold): ${String.format(Locale.getDefault(), "%.2f", hallucinationThresholdState)} — se limpeza cortar mais que ${(hallucinationThresholdState * 100).toInt()}% de transcript longo, reverte para Pass1",
+                    fontSize = 11.sp,
+                    lineHeight = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                )
+                Slider(
+                    value = hallucinationThresholdState,
+                    onValueChange = { hallucinationThresholdState = it.coerceIn(0.4f, 0.6f) },
+                    valueRange = 0.4f..0.6f,
+                    modifier = Modifier.testTag("hallucination_threshold_slider")
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("0.40", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+                    Text("0.50", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+                    Text("0.60", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+                }
+            }
+        }
+
         // System Prompt Section (Always available, but Gemini-specific in logic or useful generally)
         Card(
             modifier = Modifier
@@ -1794,7 +1864,7 @@ fun SettingsView(
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Button(
-                onClick = { onSave(providerState, keyState, openRouterKeyState, modelState, promptState, openRouterPostProcessingEnabledState, openRouterPostProcessingModelState) },
+                onClick = { onSave(providerState, keyState, openRouterKeyState, modelState, promptState, openRouterPostProcessingEnabledState, openRouterPostProcessingModelState, hallucinationAggressiveState, hallucinationThresholdState) },
                 modifier = Modifier
                     .weight(1f)
                     .height(48.dp)

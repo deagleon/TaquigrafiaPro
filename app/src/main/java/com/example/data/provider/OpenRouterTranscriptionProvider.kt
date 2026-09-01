@@ -140,17 +140,19 @@ class OpenRouterTranscriptionProvider(
 
         val rawSegments = response.segments
         val durationMs = response.duration?.let { (it * 1000).toInt() }
-        val cleanedSegments = com.example.data.SegmentUtils.cleanAndDeduplicate(rawSegments)
-        // Guard: if segment dedup collapsed >60% of long transcript (e.g. 60->10 for 5:26 video), false-positive → revert to Pass1
+        val hallucinationAggressive = prefs.getBoolean("hallucination_aggressive", false)
+        val hallucinationThreshold = prefs.getFloat("hallucination_threshold", 0.5f)
+        val cleanedSegments = com.example.data.SegmentUtils.cleanAndDeduplicate(rawSegments, hallucinationAggressive, hallucinationThreshold)
+        // Guard: if segment dedup collapsed below threshold of long transcript, false-positive → revert to Pass1
         val segments = cleanedSegments?.let { cs ->
             val rawSize = rawSegments?.size ?: 0
-            if (rawSize > 30 && cs.size < rawSize * 0.4) {
-                android.util.Log.w("OpenRouterSTT", "segment over-pruned raw=$rawSize cleaned=${cs.size}, reverting to Pass1")
-                // Revert to Pass1-only (adjacent dedup) to preserve legitimate content — DRY via SegmentUtils
+            val thr = hallucinationThreshold.coerceIn(0.4f, 0.6f)
+            if (rawSize > 30 && cs.size < rawSize * thr) {
+                android.util.Log.w("OpenRouterSTT", "segment over-pruned raw=$rawSize cleaned=${cs.size} thr=$thr, reverting to Pass1")
                 rawSegments?.let { raw ->
                     val valid = raw.filter { it.text.isNotBlank() && it.end >= it.start }.sortedBy { it.start }
-                    val pass1 = com.example.data.SegmentUtils.pass1AdjacentDedup(valid)
-                    if (pass1.size >= rawSize * 0.4) pass1 else raw
+                    val pass1 = com.example.data.SegmentUtils.pass1AdjacentDedup(valid, hallucinationAggressive)
+                    if (pass1.size >= rawSize * thr) pass1 else raw
                 } ?: cs
             } else cs
         } ?: cleanedSegments
@@ -162,7 +164,7 @@ class OpenRouterTranscriptionProvider(
 
         // Barreira textual final: remove ciclos em texto puro
         // Guard: se limpeza cortar >50% de texto longo, é provável falso-positivo → preserva original
-        val dedupedRaw = com.example.data.SegmentUtils.cleanTranscriptText(cleanRawTranscript)
+        val dedupedRaw = com.example.data.SegmentUtils.cleanTranscriptText(cleanRawTranscript, hallucinationAggressive)
         android.util.Log.d("DiagTrunc", "clean in=${cleanRawTranscript.length} out=${dedupedRaw.length} segments raw=${rawSegments?.size} cleaned=${segments?.size}")
         val finalRawText = when {
             dedupedRaw != cleanRawTranscript && dedupedRaw.length < cleanRawTranscript.length * 0.5 && cleanRawTranscript.length > 1000 -> {

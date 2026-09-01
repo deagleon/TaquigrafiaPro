@@ -72,12 +72,17 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
 
     private val _selectedModel = MutableStateFlow(sharedPrefs.getString("selected_model", "gemini-3.5-flash") ?: "gemini-3.5-flash")
     val selectedModel: StateFlow<String> = _selectedModel.asStateFlow()
-
     private val _isOpenRouterPostProcessingEnabled = MutableStateFlow(sharedPrefs.getBoolean("openrouter_post_processing_enabled", false))
     val isOpenRouterPostProcessingEnabled: StateFlow<Boolean> = _isOpenRouterPostProcessingEnabled.asStateFlow()
 
     private val _openRouterPostProcessingModel = MutableStateFlow(sharedPrefs.getString("openrouter_post_processing_model", "nvidia/nemotron-3-ultra-550b-a55b:free") ?: "nvidia/nemotron-3-ultra-550b-a55b:free")
     val openRouterPostProcessingModel: StateFlow<String> = _openRouterPostProcessingModel.asStateFlow()
+
+    private val _hallucinationAggressive = MutableStateFlow(sharedPrefs.getBoolean("hallucination_aggressive", false))
+    val hallucinationAggressive: StateFlow<Boolean> = _hallucinationAggressive.asStateFlow()
+
+    private val _hallucinationThreshold = MutableStateFlow(sharedPrefs.getFloat("hallucination_threshold", 0.5f))
+    val hallucinationThreshold: StateFlow<Float> = _hallucinationThreshold.asStateFlow()
 
     private val defaultSystemPrompt = """
         Você é um taquígrafo profissional de plenário. Sua tarefa é transcrever o áudio em português brasileiro com norma-padrão absolutamente fiel ao que foi dito.
@@ -143,7 +148,9 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         model: String,
         prompt: String,
         openRouterPostProcessingEnabled: Boolean,
-        openRouterPostProcessingModel: String
+        openRouterPostProcessingModel: String,
+        hallucinationAggressive: Boolean = _hallucinationAggressive.value,
+        hallucinationThreshold: Float = _hallucinationThreshold.value
     ) {
         _selectedProvider.value = provider
         _apiKey.value = key
@@ -152,6 +159,8 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         _systemPrompt.value = prompt
         _isOpenRouterPostProcessingEnabled.value = openRouterPostProcessingEnabled
         _openRouterPostProcessingModel.value = openRouterPostProcessingModel
+        _hallucinationAggressive.value = hallucinationAggressive
+        _hallucinationThreshold.value = hallucinationThreshold
 
         sharedPrefs.edit().apply {
             putString("selected_provider", provider)
@@ -161,6 +170,8 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
             putString("system_prompt", prompt)
             putBoolean("openrouter_post_processing_enabled", openRouterPostProcessingEnabled)
             putString("openrouter_post_processing_model", openRouterPostProcessingModel)
+            putBoolean("hallucination_aggressive", hallucinationAggressive)
+            putFloat("hallucination_threshold", hallucinationThreshold)
             apply()
         }
     }
@@ -259,13 +270,14 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                             return@launch
                         }
                         val mergedText = allTexts.joinToString("\n\n")
-                        // Deduplica global após merge (evita repetição na borda do chunk)
-                        val cleanedSegments = com.example.data.SegmentUtils.cleanAndDeduplicate(allSegments.ifEmpty { null })
+                        // Deduplica global após merge com controle de alucinação vindo de prefs
+                        val aggr = _hallucinationAggressive.value
+                        val thr = _hallucinationThreshold.value
+                        val cleanedSegments = com.example.data.SegmentUtils.cleanAndDeduplicate(allSegments.ifEmpty { null }, aggr, thr)
                         val mergedCleanText = if (!cleanedSegments.isNullOrEmpty()) {
-                            // Se segmentos existem, texto já é junção dos segmentos limpos; re-deriva para garantir consistência
                             cleanedSegments.joinToString("\n\n") { it.text.trim() }.ifBlank { mergedText }
                         } else mergedText
-                        val finalText = com.example.data.SegmentUtils.cleanTranscriptText(mergedCleanText)
+                        val finalText = com.example.data.SegmentUtils.cleanTranscriptText(mergedCleanText, aggr)
                         android.util.Log.d("DiagTrunc", "mergedTextLen=${finalText.length} segments=${cleanedSegments?.size} words=${finalText.split(Regex("\\s+")).size}")
                         transcriptionResult = com.example.data.provider.TranscriptionResult(
                             text = finalText,

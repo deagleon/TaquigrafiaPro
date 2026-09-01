@@ -15,8 +15,17 @@ object SegmentUtils {
      * Cleans and deduplicates segments returned by ASR models (like Whisper).
      * Eliminates empty segments, invalid timestamps, immediate adjacent duplicates,
      * and multi-segment repetition loops (hallucination patterns).
+     * Default (no params) keeps aggressive behavior for backward compat.
      */
-    fun cleanAndDeduplicate(segments: List<Segment>?): List<Segment>? {
+    fun cleanAndDeduplicate(segments: List<Segment>?): List<Segment>? =
+        cleanAndDeduplicate(segments, aggressive = true, threshold = 0.4f)
+
+    /**
+     * Overload with hallucination control params.
+     * @param aggressive true = k 2..12 + Levenshtein <=2, false = k 2..8 exact only (conservative)
+     * @param threshold guard threshold 0.4..0.6: revert to Pass1 if cleaned < valid*threshold when valid>30
+     */
+    fun cleanAndDeduplicate(segments: List<Segment>?, aggressive: Boolean, threshold: Float = 0.5f): List<Segment>? {
         if (segments.isNullOrEmpty()) return null
 
         val valid = segments
@@ -25,20 +34,20 @@ object SegmentUtils {
 
         if (valid.isEmpty()) return null
 
-        // Pass 1: Remove immediate adjacent duplicate segments (normalizado) — extracted for DRY reuse
-        val pass1 = pass1AdjacentDedup(valid)
+        // Pass 1: Remove immediate adjacent duplicate segments (normalizado)
+        val pass1 = pass1AdjacentDedup(valid, aggressive)
 
         if (pass1.size < 4) return pass1.ifEmpty { null }
 
-        // Pass 2: Detect and collapse multi-segment cycle repetition loops (k 2..12, cobre listas longas de votação)
+        // Pass 2: Detect and collapse multi-segment cycle repetition loops
+        val kRange = if (aggressive) 2..12 else 2..8
         val pass2 = mutableListOf<Segment>()
         var i = 0
         while (i < pass1.size) {
             var matchedCycleLen = 0
             var repetitionsToSkip = 0
 
-            // hallucinação típica é 2..12 segmentos repetidos (ex: 5 vereadores em loop)
-            for (k in 2..12) {
+            for (k in kRange) {
                 if (i + k * 2 <= pass1.size) {
                     val pattern = pass1.subList(i, i + k).map { normalizeForComparison(it.text) }
                     var nextStart = i + k
@@ -71,9 +80,6 @@ object SegmentUtils {
             }
         }
         // Pass 3: gap>5s with short text (<20) and 4-gram >3x hallucination filter
-        // Para gpt-4o-mini-transcribe sem confidence/no_speech_prob: heurística de silêncio
-        // e repetição lexical via 4-gram. Só filtra texto curto para evitar falso-positivo
-        // em conteúdo legítimo como "Projeto 1" vs "Projeto 2".
         val globalCounts = fourGramCountsSegments(pass2)
         val pass3 = mutableListOf<Segment>()
         for (seg in pass2) {
@@ -84,16 +90,16 @@ object SegmentUtils {
             val gapHalluc = short && gap > 5.0
             val ngramHalluc = short && hasRepeatedFourGram(seg, globalCounts)
             if (gapHalluc || ngramHalluc) {
-                android.util.Log.d("SegmentUtils", "filter halluc gap=$gap short=$short ngram=$ngramHalluc text=${seg.text.take(30)}")
+                try { android.util.Log.d("SegmentUtils", "filter halluc gap=$gap short=$short ngram=$ngramHalluc text=${seg.text.take(30)}") } catch (_: Exception) {}
                 continue
             }
             pass3.add(seg)
         }
-        // Guard: if dedup collapsed >60% of long transcript, it's likely a false-positive (e.g. 5:26 video 60->10)
-        // → revert to Pass1 (adjacent dedup only) to preserve legitimate content
+        // Guard: if dedup collapsed below threshold of long transcript, it's likely a false-positive
         val candidate = if (pass3.isEmpty() && pass2.isNotEmpty()) pass2 else pass3
-        if (valid.size > 30 && candidate.size < valid.size * 0.4) {
-            android.util.Log.w("OpenRouterSTT", "segment over-pruned raw=${valid.size} cleaned=${candidate.size}, reverting to Pass1")
+        val thr = threshold.coerceIn(0.4f, 0.6f).toDouble()
+        if (valid.size > 30 && candidate.size < valid.size * thr) {
+            try { android.util.Log.w("OpenRouterSTT", "segment over-pruned raw=${valid.size} cleaned=${candidate.size} thr=$thr, reverting to Pass1") } catch (_: Exception) {}
             return pass1.ifEmpty { null }
         }
         return candidate.ifEmpty { null }
@@ -102,9 +108,11 @@ object SegmentUtils {
     /**
      * Pass 1 adjacent deduplication — extracted so OpenRouter provider reuses the same logic
      * instead of duplicating Regex normalization per segment.
-     * Uses paraphrased detection: exact normalized equality OR Levenshtein <=2 for <40 chars.
+     * Uses paraphrased detection: exact normalized equality OR Levenshtein <=2 for <40 chars when aggressive.
      */
-    fun pass1AdjacentDedup(valid: List<Segment>): List<Segment> {
+    fun pass1AdjacentDedup(valid: List<Segment>): List<Segment> = pass1AdjacentDedup(valid, aggressive = true)
+
+    fun pass1AdjacentDedup(valid: List<Segment>, aggressive: Boolean): List<Segment> {
         val pass1 = mutableListOf<Segment>()
         for (seg in valid) {
             val text = seg.text.trim()
@@ -112,13 +120,18 @@ object SegmentUtils {
             if (normalized.isEmpty()) continue
 
             val last = pass1.lastOrNull()
-            if (last != null && isParaphrased(last.text, text)) {
+            val isDup = if (last != null) {
+                if (aggressive) isParaphrased(last.text, text)
+                else normalizeForComparison(last.text) == normalized
+            } else false
+            if (isDup) {
                 continue
             }
             pass1.add(seg.copy(text = text))
         }
         return pass1
     }
+
 
     private fun levenshtein(a: String, b: String): Int {
         if (a == b) return 0
@@ -198,42 +211,48 @@ object SegmentUtils {
         return false
     }
     /**
-     * Limpa texto puro (Gemini ou fallback sem segments) removendo alucinação textual:
-     * - parágrafos consecutivos duplicados
-     * - ciclos de N parágrafos repetidos (ex: lista de votos em loop)
-     * - cauda repetitiva longa
-     * Usado como última barreira antes de persistir.
+     * Limpa texto puro (Gemini ou fallback sem segments) removendo alucinação textual.
+     * Default keeps aggressive behavior for backward compat.
      */
-    fun cleanTranscriptText(raw: String): String {
+    fun cleanTranscriptText(raw: String): String = cleanTranscriptText(raw, aggressive = true)
+
+    /**
+     * Overload with hallucination control.
+     * @param aggressive true = Levenshtein + k 2..12 + 4-gram filtering; false = exact only, k 2..8, no 4-gram
+     */
+    fun cleanTranscriptText(raw: String, aggressive: Boolean, threshold: Float = 0.5f): String {
         val trimmed = raw.trim()
         if (trimmed.isEmpty()) return trimmed
-        // Split preservando estrutura: duplo \n separa parágrafos, senão quebra por linha
         val paras: List<String> = when {
             trimmed.contains("\n\n") -> trimmed.split(Regex("\n{2,}")).map { it.trim() }.filter { it.isNotEmpty() }
             trimmed.contains("\n") -> trimmed.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
             else -> splitParagraphs(trimmed)
         }.ifEmpty { return trimmed }
 
-        // Pass A: remove duplicatas consecutivas (paraphrased: exact ou Levenshtein <=2 para <40 chars)
+        // Pass A: remove duplicatas consecutivas
         val deduped = mutableListOf<String>()
         for (p in paras) {
             val norm = normalizeForComparison(p)
             if (norm.isEmpty()) continue
             val last = deduped.lastOrNull()
-            if (last != null && isParaphrased(last, p)) continue
+            val isDup = if (last != null) {
+                if (aggressive) isParaphrased(last, p) else normalizeForComparison(last) == norm
+            } else false
+            if (isDup) continue
             deduped.add(p)
         }
         if (deduped.size < 4) {
             val early = deduped.joinToString("\n\n")
-            android.util.Log.d("DiagTrunc", "clean in=${trimmed.length} out=${early.length} paras in=${paras.size} out=${deduped.size} early=true")
+            try { android.util.Log.d("DiagTrunc", "clean in=${trimmed.length} out=${early.length} paras in=${paras.size} out=${deduped.size} early=true aggr=$aggressive") } catch (_: Exception) {}
             return early
         }
+        val kRange = if (aggressive) 2..12 else 2..8
         val out = mutableListOf<String>()
         var idx = 0
         while (idx < deduped.size) {
             var matchedLen = 0
             var skip = 0
-            for (k in 2..12) {
+            for (k in kRange) {
                 if (idx + k * 2 <= deduped.size) {
                     val pattern = deduped.subList(idx, idx + k).map { normalizeForComparison(it) }
                     var next = idx + k
@@ -252,32 +271,34 @@ object SegmentUtils {
                 out.add(deduped[idx]); idx++
             }
         }
-        // 4-gram >3x filtering for short paras — only for paraphrased hallucination,
-        // keeps first occurrence and filters subsequent duplicates with same repeated 4-gram
-        val globalCounts = fourGramCountsParas(paras)
-        val filtered = mutableListOf<String>()
-        val keptGrams = mutableSetOf<String>()
-        for (para in out) {
-            if (para.trim().length < 40 && hasRepeatedFourGramPara(para, globalCounts)) {
-                val words = normalizeForComparison(para).split(Regex("\\s+")).filter { it.isNotEmpty() }
-                var isDup = false
-                for (w in 0..words.size - 4) {
-                    val gram = words.subList(w, w + 4).joinToString(" ")
-                    if ((globalCounts[gram] ?: 0) > 3 && keptGrams.contains(gram)) { isDup = true; break }
+        // 4-gram filtering only when aggressive (avoids false-positive in conservative)
+        val filtered: List<String> = if (aggressive) {
+            val globalCounts = fourGramCountsParas(paras)
+            val tmp = mutableListOf<String>()
+            val keptGrams = mutableSetOf<String>()
+            for (para in out) {
+                if (para.trim().length < 40 && hasRepeatedFourGramPara(para, globalCounts)) {
+                    val words = normalizeForComparison(para).split(Regex("\\s+")).filter { it.isNotEmpty() }
+                    var isDup = false
+                    for (w in 0..words.size - 4) {
+                        val gram = words.subList(w, w + 4).joinToString(" ")
+                        if ((globalCounts[gram] ?: 0) > 3 && keptGrams.contains(gram)) { isDup = true; break }
+                    }
+                    if (isDup) {
+                        try { android.util.Log.d("SegmentUtils", "filter 4-gram para=${para.take(30)}") } catch (_: Exception) {}
+                        continue
+                    }
+                    for (w in 0..words.size - 4) {
+                        val gram = words.subList(w, w + 4).joinToString(" ")
+                        if ((globalCounts[gram] ?: 0) > 3) keptGrams.add(gram)
+                    }
                 }
-                if (isDup) {
-                    android.util.Log.d("SegmentUtils", "filter 4-gram para=${para.take(30)}")
-                    continue
-                }
-                for (w in 0..words.size - 4) {
-                    val gram = words.subList(w, w + 4).joinToString(" ")
-                    if ((globalCounts[gram] ?: 0) > 3) keptGrams.add(gram)
-                }
+                tmp.add(para)
             }
-            filtered.add(para)
-        }
+            tmp
+        } else out
         val result = filtered.joinToString("\n\n")
-        android.util.Log.d("DiagTrunc", "clean in=${trimmed.length} out=${result.length} paras in=${paras.size} out=${result.split(Regex("\n\n")).size}")
+        try { android.util.Log.d("DiagTrunc", "clean in=${trimmed.length} out=${result.length} paras in=${paras.size} out=${result.split(Regex("\n\n")).size} aggr=$aggressive") } catch (_: Exception) {}
         return result
     }
 
