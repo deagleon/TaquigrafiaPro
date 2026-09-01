@@ -85,6 +85,12 @@ object SegmentUtils {
         // Pass 3: Tail hallucination — se cauda repete frase única muitas vezes fora do ciclo acima,
         // já foi colapsada por Pass1; mas se houver cauda inventada não-repetitiva, não há o que filtrar aqui.
         // Mantemos pass2 como resultado.
+        // Guard: if dedup collapsed >60% of long transcript, it's likely a false-positive (e.g. 5:26 video 60->10)
+        // → revert to Pass1 (adjacent dedup only) to preserve legitimate content
+        if (valid.size > 30 && pass2.size < valid.size * 0.4) {
+            android.util.Log.w("OpenRouterSTT", "segment over-pruned raw=${valid.size} cleaned=${pass2.size}, reverting to Pass1")
+            return pass1.ifEmpty { null }
+        }
         return pass2.ifEmpty { null }
     }
 

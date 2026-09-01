@@ -141,7 +141,27 @@ class OpenRouterTranscriptionProvider(
         val rawSegments = response.segments
         val durationMs = response.duration?.let { (it * 1000).toInt() }
         val cleanedSegments = com.example.data.SegmentUtils.cleanAndDeduplicate(rawSegments)
-        val segments = cleanedSegments
+        // Guard: if segment dedup collapsed >60% of long transcript (e.g. 60->10 for 5:26 video), false-positive → revert to Pass1
+        val segments = cleanedSegments?.let { cs ->
+            val rawSize = rawSegments?.size ?: 0
+            if (rawSize > 30 && cs.size < rawSize * 0.4) {
+                android.util.Log.w("OpenRouterSTT", "segment over-pruned raw=$rawSize cleaned=${cs.size}, reverting to Pass1")
+                // Revert to Pass1-only (adjacent dedup) to preserve legitimate content
+                rawSegments?.let { raw ->
+                    val valid = raw.filter { it.text.isNotBlank() && it.end >= it.start }.sortedBy { it.start }
+                    val pass1 = mutableListOf<com.example.data.api.Segment>()
+                    for (seg in valid) {
+                        val n = seg.text.trim().lowercase(java.util.Locale.ROOT).replace(Regex("[^\\p{L}\\p{Nd}]+"), " ").trim()
+                        if (n.isEmpty()) continue
+                        val last = pass1.lastOrNull()
+                        val lastNorm = last?.text?.trim()?.lowercase(java.util.Locale.ROOT)?.replace(Regex("[^\\p{L}\\p{Nd}]+"), " ")?.trim()
+                        if (last != null && lastNorm == n) continue
+                        pass1.add(seg.copy(text = seg.text.trim()))
+                    }
+                    if (pass1.size >= rawSize * 0.4) pass1 else raw
+                } ?: cs
+            } else cs
+        } ?: cleanedSegments
 
         val cleanRawTranscript = if (!segments.isNullOrEmpty()) {
             segments.joinToString("\n\n") { it.text.trim() }

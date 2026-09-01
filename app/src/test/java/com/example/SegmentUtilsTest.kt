@@ -54,6 +54,15 @@ class SegmentUtilsTest {
     }
 
     @Test
+    fun `cleanAndDeduplicate reverts when pruned more than 60 percent`() {
+        val raw = (1..60).map { i -> Segment(id = i, seek = 0, start = i * 2.0, end = i * 2.0 + 1.5, text = "Frase única $i com conteúdo distinto $i") }
+        val cleaned = SegmentUtils.cleanAndDeduplicate(raw)
+        // With no hallucination, cleaned should be ~60, not collapsed to ~10 (guard against 5:26 false-positive)
+        assertNotNull(cleaned)
+        assertEquals(60, cleaned!!.size)
+    }
+
+    @Test
     fun `test findActiveIndex with direct hit, pause gap and boundaries`() {
         val timed = listOf(
             TimedParagraph("Parágrafo 1", 0, 3000),      // 0 - 3s
