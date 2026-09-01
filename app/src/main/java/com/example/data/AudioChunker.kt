@@ -8,6 +8,7 @@ import android.media.MediaMuxer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import com.example.data.api.Segment
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -16,14 +17,60 @@ object AudioChunker {
     private const val TAG = "AudioChunker"
     private const val DEFAULT_CHUNK_MS = 5 * 60 * 1000 // 5 min
     private const val MAX_CHUNK_MS = 8 * 60 * 1000 // 8 min soft limit
+    const val VAD_CHUNK_MS = 2 * 60 * 1000 // 2 min for silence
+    private const val SILENCE_RATIO_THRESHOLD = 0.3
+    private const val GAP_THRESHOLD_S = 5.0
+    private const val SHORT_TEXT_CHARS = 20
+
+    fun isSilenceTriggered(silenceRatio: Double?, hasLongSilenceGap: Boolean): Boolean {
+        return (silenceRatio != null && silenceRatio > SILENCE_RATIO_THRESHOLD) || hasLongSilenceGap
+    }
+
+    fun getChunkDurationMs(silenceRatio: Double? = null, hasLongSilenceGap: Boolean = false): Int {
+        return if (isSilenceTriggered(silenceRatio, hasLongSilenceGap)) VAD_CHUNK_MS else DEFAULT_CHUNK_MS
+    }
+
+    fun hasLongSilenceGap(segments: List<Segment>?): Boolean {
+        if (segments == null || segments.size < 2) return false
+        val sorted = segments.sortedBy { it.start }
+        for (i in 0 until sorted.size - 1) {
+            val cur = sorted[i]
+            val nxt = sorted[i + 1]
+            val gap = nxt.start - cur.end
+            if (gap > GAP_THRESHOLD_S) {
+                val shortA = cur.text.trim().length < SHORT_TEXT_CHARS
+                val shortB = nxt.text.trim().length < SHORT_TEXT_CHARS
+                if (shortA || shortB) return true
+            }
+        }
+        return false
+    }
 
     fun isChunkingNeeded(durationMs: Int?, fileSize: Long): Boolean {
+        return isChunkingNeeded(durationMs, fileSize, null, false)
+    }
+
+    fun isChunkingNeeded(durationMs: Int?, fileSize: Long, silenceRatio: Double?, hasLongSilenceGap: Boolean = false): Boolean {
+        if (isSilenceTriggered(silenceRatio, hasLongSilenceGap)) return true
         return (durationMs != null && durationMs > MAX_CHUNK_MS) || fileSize > 20L * 1024 * 1024
+    }
+
+    /** Overload accepting segments to derive gap heurística. */
+    fun isChunkingNeeded(durationMs: Int?, fileSize: Long, silenceRatio: Double?, segments: List<Segment>?): Boolean {
+        return isChunkingNeeded(durationMs, fileSize, silenceRatio, hasLongSilenceGap(segments))
     }
 
     data class Chunk(val file: File, val startMs: Long, val durationMs: Long)
 
     suspend fun splitIfNeeded(context: Context, uri: Uri, fileName: String, durationMs: Int?, fileSize: Long? = null): List<Chunk> {
+        return splitIfNeeded(context, uri, fileName, durationMs, fileSize, null, false, null)
+    }
+
+    suspend fun splitIfNeeded(
+        context: Context, uri: Uri, fileName: String, durationMs: Int?,
+        fileSize: Long? = null, silenceRatio: Double?, hasLongSilenceGap: Boolean = false,
+        segments: List<Segment>? = null
+    ): List<Chunk> {
         var dur = durationMs
         if (dur == null) {
             dur = try {
@@ -34,19 +81,22 @@ object AudioChunker {
                 } finally { try { r.release() } catch (_: Exception) {} }
             } catch (_: Exception) { null }
         }
+        val silenceTriggered = isSilenceTriggered(silenceRatio, hasLongSilenceGap) || hasLongSilenceGap(segments)
+        val chunkMs = if (silenceTriggered) VAD_CHUNK_MS else DEFAULT_CHUNK_MS
         // Se dur ainda null mas arquivo >20MB, estima dur via bytes e força chunk por bytes
         if (dur == null) {
             if (fileSize != null && fileSize > 20L * 1024 * 1024) {
                 // estima 7.5 chars/sec ~ 1KB per ~2 sec para fallback
                 val estDurMs = ((fileSize / 1024.0) * 2000).toInt().coerceAtLeast(MAX_CHUNK_MS + 1000)
-                return splitAudio(context, uri, fileName, estDurMs, DEFAULT_CHUNK_MS)
+                return splitAudio(context, uri, fileName, estDurMs, chunkMs)
             }
+            // Para silêncio com dur null mas sem size grande, não há como chunkar sem dur
             return emptyList()
         }
-        if (dur <= MAX_CHUNK_MS && (fileSize == null || fileSize <= 20L * 1024 * 1024)) return emptyList()
-        // Se dur <=8min mas size >20MB, ainda chunk por bytes (ex: WAV 5min 30MB)
-        val effectiveDur = dur.coerceAtLeast(MAX_CHUNK_MS + 1000)
-        return splitAudio(context, uri, fileName, effectiveDur, DEFAULT_CHUNK_MS)
+        if (dur <= MAX_CHUNK_MS && (fileSize == null || fileSize <= 20L * 1024 * 1024) && !silenceTriggered) return emptyList()
+        // Para silêncio, usa dur real (326k -> 3 chunks de 2min); para demais usa coerce para garantir >1 chunk
+        val effectiveDur = if (silenceTriggered) dur else dur.coerceAtLeast(MAX_CHUNK_MS + 1000)
+        return splitAudio(context, uri, fileName, effectiveDur, chunkMs)
     }
 
     fun splitAudio(context: Context, uri: Uri, fileName: String, totalDurationMs: Int, chunkDurationMs: Int = DEFAULT_CHUNK_MS): List<Chunk> {
