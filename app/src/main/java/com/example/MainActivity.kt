@@ -949,6 +949,7 @@ fun DetailView(
     val timedParagraphs: List<TimedParagraph> = remember(displayParas, segments, effectiveAudioDuration) {
         SegmentUtils.buildTimedParagraphs(displayParas, segments, effectiveAudioDuration)
     }
+    android.util.Log.d("DiagTrunc", "UI paras display=${displayParas.size} timed=${timedParagraphs.size} dbLen=${entity.transcriptText.length}")
 
     val activeIdx by remember {
         derivedStateOf {
