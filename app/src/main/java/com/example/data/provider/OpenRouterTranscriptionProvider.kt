@@ -146,23 +146,14 @@ class OpenRouterTranscriptionProvider(
             val rawSize = rawSegments?.size ?: 0
             if (rawSize > 30 && cs.size < rawSize * 0.4) {
                 android.util.Log.w("OpenRouterSTT", "segment over-pruned raw=$rawSize cleaned=${cs.size}, reverting to Pass1")
-                // Revert to Pass1-only (adjacent dedup) to preserve legitimate content
+                // Revert to Pass1-only (adjacent dedup) to preserve legitimate content — DRY via SegmentUtils
                 rawSegments?.let { raw ->
                     val valid = raw.filter { it.text.isNotBlank() && it.end >= it.start }.sortedBy { it.start }
-                    val pass1 = mutableListOf<com.example.data.api.Segment>()
-                    for (seg in valid) {
-                        val n = seg.text.trim().lowercase(java.util.Locale.ROOT).replace(Regex("[^\\p{L}\\p{Nd}]+"), " ").trim()
-                        if (n.isEmpty()) continue
-                        val last = pass1.lastOrNull()
-                        val lastNorm = last?.text?.trim()?.lowercase(java.util.Locale.ROOT)?.replace(Regex("[^\\p{L}\\p{Nd}]+"), " ")?.trim()
-                        if (last != null && lastNorm == n) continue
-                        pass1.add(seg.copy(text = seg.text.trim()))
-                    }
+                    val pass1 = com.example.data.SegmentUtils.pass1AdjacentDedup(valid)
                     if (pass1.size >= rawSize * 0.4) pass1 else raw
                 } ?: cs
             } else cs
         } ?: cleanedSegments
-
         val cleanRawTranscript = if (!segments.isNullOrEmpty()) {
             segments.joinToString("\n\n") { it.text.trim() }
         } else {

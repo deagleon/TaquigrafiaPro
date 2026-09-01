@@ -118,4 +118,29 @@ class SegmentUtilsTest {
         assertEquals("Primeiro bloco de texto.", split[0])
         assertEquals("Segundo bloco de texto.\nTerceiro bloco.", split[1])
     }
+
+    @Test
+    fun `splitParagraphs handles single newlines and preserves content`() {
+        // Single newline (not double) should split into separate paragraphs / keep content
+        val singleNl = "Linha 1\nLinha 2\nLinha 3"
+        val splitSingle = SegmentUtils.splitParagraphs(singleNl)
+        assertEquals(3, splitSingle.size)
+        assertEquals("Linha 1", splitSingle[0])
+        assertEquals("Linha 2", splitSingle[1])
+        assertEquals("Linha 3", splitSingle[2])
+
+        // Double newline case already re-tested separately
+        val doubleNl = "A.\n\nB."
+        val splitDouble = SegmentUtils.splitParagraphs(doubleNl)
+        assertEquals(2, splitDouble.size)
+        assertEquals("A.", splitDouble[0])
+        assertEquals("B.", splitDouble[1])
+
+        // Mixed: empty lines filtered, whitespace trimmed
+        val mixed = "  Foo  \n\n  \n Bar \n\n"
+        val splitMixed = SegmentUtils.splitParagraphs(mixed)
+        assertTrue(splitMixed.all { it.isNotBlank() })
+        assertTrue(splitMixed.contains("Foo"))
+        assertTrue(splitMixed.contains("Bar"))
+    }
 }

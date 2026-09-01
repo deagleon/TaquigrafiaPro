@@ -6,12 +6,12 @@ import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.util.Log
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
-
 object AudioChunker {
     private const val TAG = "AudioChunker"
     private const val DEFAULT_CHUNK_MS = 5 * 60 * 1000 // 5 min
@@ -61,11 +61,11 @@ object AudioChunker {
         val chunks = mutableListOf<Chunk>()
         var extractor: MediaExtractor? = null
         var muxer: MediaMuxer? = null
+        var pfd: ParcelFileDescriptor? = null
         try {
             extractor = MediaExtractor()
-            val pfd = context.contentResolver.openFileDescriptor(uri, "r") ?: return emptyList()
+            pfd = context.contentResolver.openFileDescriptor(uri, "r") ?: return emptyList()
             extractor.setDataSource(pfd.fileDescriptor)
-            pfd.close()
             if (extractor.trackCount == 0) return emptyList()
             var audioTrackIdx = -1
             var audioFormat: MediaFormat? = null
@@ -157,6 +157,7 @@ object AudioChunker {
             Log.w(TAG, "splitViaExtractor failed: ${e.message}", e)
             return emptyList()
         } finally {
+            try { pfd?.close() } catch (_: Exception) {}
             try { extractor?.release() } catch (_: Exception) {}
             try { muxer?.release() } catch (_: Exception) {}
         }

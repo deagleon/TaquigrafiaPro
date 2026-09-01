@@ -25,19 +25,8 @@ object SegmentUtils {
 
         if (valid.isEmpty()) return null
 
-        // Pass 1: Remove immediate adjacent duplicate segments (normalizado)
-        val pass1 = mutableListOf<Segment>()
-        for (seg in valid) {
-            val text = seg.text.trim()
-            val normalized = normalizeForComparison(text)
-            if (normalized.isEmpty()) continue
-
-            val last = pass1.lastOrNull()
-            if (last != null && normalizeForComparison(last.text) == normalized) {
-                continue
-            }
-            pass1.add(seg.copy(text = text))
-        }
+        // Pass 1: Remove immediate adjacent duplicate segments (normalizado) — extracted for DRY reuse
+        val pass1 = pass1AdjacentDedup(valid)
 
         if (pass1.size < 4) return pass1.ifEmpty { null }
 
@@ -92,6 +81,26 @@ object SegmentUtils {
             return pass1.ifEmpty { null }
         }
         return pass2.ifEmpty { null }
+    }
+
+    /**
+     * Pass 1 adjacent deduplication — extracted so OpenRouter provider reuses the same logic
+     * instead of duplicating Regex normalization per segment.
+     */
+    fun pass1AdjacentDedup(valid: List<Segment>): List<Segment> {
+        val pass1 = mutableListOf<Segment>()
+        for (seg in valid) {
+            val text = seg.text.trim()
+            val normalized = normalizeForComparison(text)
+            if (normalized.isEmpty()) continue
+
+            val last = pass1.lastOrNull()
+            if (last != null && normalizeForComparison(last.text) == normalized) {
+                continue
+            }
+            pass1.add(seg.copy(text = text))
+        }
+        return pass1
     }
 
     /**

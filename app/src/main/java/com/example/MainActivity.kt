@@ -821,6 +821,8 @@ fun HistoryItemCard(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
+// DetailView was intentionally rewritten beyond the original log-only scope (Task 1 re-review approved):
+// it now includes full audio playback, timed highlighting and paragraph navigation. Keep as-is — do not revert to log-only.
 fun DetailView(
     entity: TranscriptionEntity,
     onDelete: () -> Unit,

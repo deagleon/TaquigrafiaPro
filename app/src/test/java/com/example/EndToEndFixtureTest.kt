@@ -18,30 +18,39 @@ class EndToEndFixtureTest {
 
     @Test
     fun `fixture files exist with correct duration`() {
-        val f1 = File("assets/test_5_26.m4a")
-        val f2 = File("assets/test_26min.m4a")
-        // Also try relative from app dir
-        val f1a = File("../assets/test_5_26.m4a")
-        val f2a = File("../assets/test_26min.m4a")
-        val exists1 = f1.exists() || f1a.exists()
-        val exists2 = f2.exists() || f2a.exists()
-        assertTrue("test_5_26.m4a missing (checked assets/test_5_26.m4a and ../assets/test_5_26.m4a)", exists1)
-        assertTrue("test_26min.m4a missing", exists2)
-        val file1 = if (f1.exists()) f1 else f1a
-        val file2 = if (f2.exists()) f2 else f2a
-        assertTrue("5:26 fixture too small: ${file1.length()} bytes", file1.length() > 10_000)
-        assertTrue("26min fixture too small: ${file2.length()} bytes", file2.length() > 10_000)
+        // Fixtures are packaged at app/src/main/assets/ and also kept at repo root assets/ for legacy
+        // Gradle unit tests run with cwd = app/, so check both "src/main/assets/" and "app/src/main/assets/"
+        val candidates1 = listOf(
+            File("src/main/assets/test_5_26.m4a"),
+            File("app/src/main/assets/test_5_26.m4a"),
+            File("assets/test_5_26.m4a"),
+            File("../assets/test_5_26.m4a")
+        )
+        val candidates2 = listOf(
+            File("src/main/assets/test_26min.m4a"),
+            File("app/src/main/assets/test_26min.m4a"),
+            File("assets/test_26min.m4a"),
+            File("../assets/test_26min.m4a")
+        )
+        val file1 = candidates1.firstOrNull { it.exists() }
+        val file2 = candidates2.firstOrNull { it.exists() }
+        assertTrue("test_5_26.m4a missing (checked ${candidates1.map { it.path }})", file1 != null && file1.exists())
+        assertTrue("test_26min.m4a missing (checked ${candidates2.map { it.path }})", file2 != null && file2.exists())
+        assertTrue("5:26 fixture too small: ${file1!!.length()} bytes", file1.length() > 10_000)
+        assertTrue("26min fixture too small: ${file2!!.length()} bytes", file2.length() > 10_000)
         // 26min should be ~4.7x larger than 5:26 (1560/326 ≈ 4.78) — allow wide tolerance for silent encoding
         val ratio = file2.length().toDouble() / file1.length().toDouble()
         assertTrue("26min fixture should be larger than 5:26 (ratio=$ratio)", ratio > 2.0)
+        // Prefer packaged path — check both possible cwds
+        val packagedExists = File("src/main/assets/test_5_26.m4a").exists() || File("app/src/main/assets/test_5_26.m4a").exists()
+        assertTrue("packaged fixture at src/main/assets/test_5_26.m4a or app/src/main/assets/test_5_26.m4a should exist", packagedExists)
     }
-
     @Test
     fun `5_26 does not need chunking`() {
         // 5:26 = 326s = 326_000ms < MAX_CHUNK_MS (480_000) and small file => no chunk
         val smallSize = 7L * 1024 * 1024 // ~7MB typical AAC 128k for 5:26 speech
         assertFalse("5:26 small file should NOT need chunk", AudioChunker.isChunkingNeeded(dur5_26, smallSize))
-        val fixtureSize = File("assets/test_5_26.m4a").let { if (it.exists()) it.length() else File("../assets/test_5_26.m4a").length() }
+        val fixtureSize = File("src/main/assets/test_5_26.m4a").let { if (it.exists()) it.length() else File("app/src/main/assets/test_5_26.m4a").let { f -> if (f.exists()) f.length() else File("assets/test_5_26.m4a").let { f2 -> if (f2.exists()) f2.length() else File("../assets/test_5_26.m4a").length() } } }
         assertFalse("5:26 fixture (${fixtureSize}B) should NOT need chunk", AudioChunker.isChunkingNeeded(dur5_26, fixtureSize))
     }
 

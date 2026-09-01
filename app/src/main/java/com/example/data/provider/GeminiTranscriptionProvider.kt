@@ -23,8 +23,6 @@ class GeminiTranscriptionProvider(
         val activeKey = apiKeyResolver.geminiKey()
             ?: return Result.failure(IllegalStateException("Chave de API do Gemini não configurada. Por favor, insira sua chave nas Configurações (ícone de engrenagem no topo)."))
 
-        // Estimativa: ~5 tokens/seg para pt-BR, 26min ~7800 tokens + prompt → precisa 16384
-        val estimatedTokens = (request.fileInfo.size / 1024).coerceAtLeast(2048) // fallback por tamanho
         val apiRequest = GenerateContentRequest(
             contents = listOf(
                 Content(
@@ -37,7 +35,6 @@ class GeminiTranscriptionProvider(
             systemInstruction = Content(parts = listOf(Part(text = request.systemPrompt))),
             generationConfig = GenerationConfig(temperature = 0.1f, maxOutputTokens = 16384)
         )
-
         val response = try {
             service.generateContent(
                 model = request.model,
