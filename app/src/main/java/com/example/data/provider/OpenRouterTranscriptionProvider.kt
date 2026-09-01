@@ -197,7 +197,7 @@ class OpenRouterTranscriptionProvider(
             ?: "nvidia/nemotron-3-ultra-550b-a55b:free"
 
         val strictUserPrompt = """
-            Abaixo está a transcrição BRUTA já fiel ao áudio. Sua tarefa é APENAS corrigir pontuação, ortografia e quebras de linha, SEM alterar palavras, SEM adicionar ou remover conteúdo, SEM inventar. Se houver [inaudível], preserve exatamente. Mantenha literalidade absoluta. Não adicione introduções, resumos ou comentários. Texto bruto:
+            Abaixo está a transcrição BRUTA já fiel ao áudio. Sua tarefa é APENAS corrigir pontuação, ortografia e quebras de linha, SEM alterar palavras, SEM adicionar ou remover conteúdo, SEM inventar. Se houver [inaudível], preserve exatamente. Mantenha literalidade absoluta. Não adicione introduções, resumos ou comentários. Se o texto bruto contiver repetição exata, mantenha apenas uma ocorrência; se contiver trecho que não parece fala (ex: lista de vereadores repetida), remova. Texto bruto:
 
             $finalRawText
         """.trimIndent()
@@ -208,7 +208,8 @@ class OpenRouterTranscriptionProvider(
                 ChatMessage(role = "system", content = request.systemPrompt),
                 ChatMessage(role = "user", content = strictUserPrompt)
             ),
-            temperature = 0.1
+            temperature = 0.1,
+            topP = 0.1
         )
 
         val chatResponse = try {

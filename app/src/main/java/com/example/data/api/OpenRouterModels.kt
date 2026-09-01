@@ -59,7 +59,8 @@ data class OpenRouterChatCompletionRequest(
     @Json(name = "model") val model: String,
     @Json(name = "messages") val messages: List<ChatMessage>,
     @Json(name = "temperature") val temperature: Double? = 0.1,
-    @Json(name = "max_tokens") val maxTokens: Int? = 16384
+    @Json(name = "max_tokens") val maxTokens: Int? = 16384,
+    @Json(name = "top_p") val topP: Double? = 0.1
 )
 
 @JsonClass(generateAdapter = true)

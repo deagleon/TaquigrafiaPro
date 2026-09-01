@@ -33,7 +33,7 @@ class GeminiTranscriptionProvider(
                 )
             ),
             systemInstruction = Content(parts = listOf(Part(text = request.systemPrompt))),
-            generationConfig = GenerationConfig(temperature = 0.1f, maxOutputTokens = 16384)
+            generationConfig = GenerationConfig(temperature = 0.1f, topP = 0.1f, maxOutputTokens = 16384)
         )
         val response = try {
             service.generateContent(
