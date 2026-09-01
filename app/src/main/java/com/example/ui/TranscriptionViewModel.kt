@@ -291,6 +291,7 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                 }
 
                 val transcriptText = transcriptionResult.text
+                android.util.Log.d("Halluc", "rawTextLen=${transcriptText.length} segmentsRaw=${transcriptionResult.segments?.size} cleaned=${transcriptionResult.segments?.size} dedupedRawLen=${transcriptText.length} finalLen=${transcriptText.length} first3=${transcriptionResult.segments?.take(3)?.map{com.example.data.SegmentUtils.normalizeForComparison(it.text)}} last3=${transcriptionResult.segments?.takeLast(3)?.map{com.example.data.SegmentUtils.normalizeForComparison(it.text)}}")
                 if (transcriptText.isBlank()) {
                     _transcriptionState.value = TranscriptionState.Error("O provedor não retornou nenhum texto para esta transcrição.")
                     return@launch

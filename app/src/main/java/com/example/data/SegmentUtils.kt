@@ -283,7 +283,7 @@ object SegmentUtils {
         }
     }
 
-    private fun normalizeForComparison(s: String): String {
+    fun normalizeForComparison(s: String): String {
         return s.lowercase(Locale.ROOT)
             .replace(Regex("[^\\p{L}\\p{Nd}]+"), " ")
             .trim()

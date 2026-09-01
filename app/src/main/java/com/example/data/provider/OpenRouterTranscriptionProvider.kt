@@ -175,6 +175,7 @@ class OpenRouterTranscriptionProvider(
             }
             else -> cleanRawTranscript
         }
+        android.util.Log.d("Halluc", "rawTextLen=${cleanRawTranscript.length} segmentsRaw=${rawSegments?.size} cleaned=${segments?.size} dedupedRawLen=${dedupedRaw.length} finalLen=${finalRawText.length} first3=${rawSegments?.take(3)?.map{com.example.data.SegmentUtils.normalizeForComparison(it.text)}} last3=${rawSegments?.takeLast(3)?.map{com.example.data.SegmentUtils.normalizeForComparison(it.text)}}")
 
         // Detecção de truncamento suspeitosamente curto vs duração (5min ~4500 chars, 26min ~23000 chars)
         durationMs?.let { dur ->
