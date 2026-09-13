@@ -20,6 +20,7 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipe
 import androidx.compose.ui.test.onNodeWithContentDescription
 import org.robolectric.shadows.util.DataSource
+import androidx.compose.ui.test.doubleClick
 import com.example.data.SegmentUtils
 import com.example.data.TranscriptionEntity
 import com.example.ui.theme.MyApplicationTheme
@@ -345,6 +346,68 @@ class DetailViewScreenshotTest {
     composeTestRule.onNodeWithContentDescription("laço de", substring = true).assertDoesNotExist()
   }
 
+
+  private fun waveNode() = composeTestRule.onNodeWithTag("waveform_bar")
+
+  private fun waveSize() = waveNode().fetchSemanticsNode().size
+
+  @Test fun `double-tap left goes back 5s from current`() {
+    showWaveform()
+    repeat(2) {
+      composeTestRule.onNodeWithTag("skip_forward_button").performClick()
+      composeTestRule.waitForIdle()
+    }
+    val size = waveSize()
+    waveNode().performTouchInput { doubleClick(Offset(size.width * 0.1f, size.height / 2f)) }
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("00:05 / 05:26").assertExists()
+  }
+
+  @Test fun `double-tap right advances 5s from current`() {
+    showWaveform()
+    repeat(2) {
+      composeTestRule.onNodeWithTag("skip_forward_button").performClick()
+      composeTestRule.waitForIdle()
+    }
+    val size = waveSize()
+    waveNode().performTouchInput { doubleClick(Offset(size.width * 0.9f, size.height / 2f)) }
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("00:15 / 05:26").assertExists()
+  }
+
+  @Test fun `double-tap center toggles play`() {
+    showWaveform()
+    composeTestRule.onNodeWithTag("waveform_bar").performTouchInput { doubleClick() }
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithContentDescription("Tocar").assertDoesNotExist()
+  }
+
+  @Test fun `text taps stay plain seeks without gesture math`() {
+    showWaveform()
+    repeat(2) {
+      composeTestRule.onNodeWithTag("skip_forward_button").performClick()
+      composeTestRule.waitForIdle()
+    }
+    composeTestRule.onNodeWithTag("paragraph_0").performTouchInput { doubleClick() }
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("00:00 / 05:26").assertExists()
+    composeTestRule.onNodeWithContentDescription("Tocar").assertDoesNotExist()
+  }
+
+  @Test fun `hold advances continuously until release`() {
+    showWaveform()
+    val size = waveSize()
+    waveNode().performTouchInput {
+      swipe(
+        Offset(size.width * 0.75f, size.height / 2f),
+        Offset(size.width * 0.75f, size.height / 2f),
+        durationMillis = 1200
+      )
+    }
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("00:00 / 05:26").assertDoesNotExist()
+    composeTestRule.onNodeWithText("00:0", substring = true).assertExists()
+  }
 
   private fun showEditor(onUpdateText: (String) -> Unit = {}) {
     composeTestRule.setContent {

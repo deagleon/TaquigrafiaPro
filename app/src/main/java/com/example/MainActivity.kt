@@ -109,6 +109,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -117,6 +118,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.semantics.contentDescription
@@ -149,6 +153,7 @@ import com.example.ui.TranscriptionState
 import com.example.ui.TranscriptionViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -1104,6 +1109,13 @@ fun DetailView(
 
         if (!isExpanded) Spacer(modifier = Modifier.height(8.dp))
 
+        fun seekBy(deltaMs: Int) {
+            val upper = if (duration > 0) duration else 0
+            val target = (currentPosition + deltaMs).coerceIn(0, upper)
+            currentPosition = target
+            try { mediaPlayer?.seekTo(target) } catch (e: Exception) { e.printStackTrace() }
+        }
+
         PlayerCard(
             modifier = Modifier.fillMaxWidth().widthIn(max = 600.dp),
             compact = isExpanded && isImeVisible,
@@ -1152,12 +1164,7 @@ fun DetailView(
                 currentPosition = dragValue.toInt()
                 try { mediaPlayer?.seekTo(dragValue.toInt()) } catch (e: Exception) { e.printStackTrace() }
             },
-            onSkip = { deltaMs ->
-                val upper = if (duration > 0) duration else 0
-                val target = (currentPosition + deltaMs).coerceIn(0, upper)
-                currentPosition = target
-                try { mediaPlayer?.seekTo(target) } catch (e: Exception) { e.printStackTrace() }
-            },
+            onSkip = { seekBy(it) },
             onSpeedChange = {
                 val idx = PLAYBACK_SPEEDS.indexOf(playbackSpeed).takeIf { it >= 0 } ?: 2
                 playbackSpeed = PLAYBACK_SPEEDS[(idx + 1) % PLAYBACK_SPEEDS.size]
@@ -1177,7 +1184,8 @@ fun DetailView(
                     loopRangeMs = it
                     loopArmed = false
                 }
-            }
+            },
+            onHoldTick = { dir -> seekBy(dir * 1000) }
         )
 
         if (!isExpanded) {
@@ -1279,6 +1287,8 @@ fun DetailView(
 private val PLAYBACK_SPEEDS = listOf(0.75f, 0.85f, 1f, 1.15f, 1.25f, 1.5f)
 /** Minimum loop span; shorter drags are not a Laço. */
 private const val MIN_LOOP_SPAN_MS = 500
+/** Hold-repeat cadence: ±1s per tick while pressed. */
+private const val HOLD_TICK_MS = 150L
 
 /** Repeat jump for [posMs] inside [loop], or null to keep playing. */
 internal fun loopRepeatTarget(posMs: Int, loop: Pair<Int, Int>?): Int? =
@@ -1327,6 +1337,8 @@ private fun WaveformBar(
     selectingLoop: Boolean = false,
     onLoopSelect: (Int, Int) -> Unit = { _, _ -> },
     contentDescription: String = "Forma de onda",
+    onPlayPause: () -> Unit = {},
+    onHoldTick: (Int) -> Unit = {},
 ) {
     val playedColor = MaterialTheme.colorScheme.primary
     val unplayedColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
@@ -1335,6 +1347,13 @@ private fun WaveformBar(
     fun xToMs(x: Float, width: Float): Int =
         ((x / width.coerceAtLeast(1f)) * durationMs).toInt().coerceIn(0, durationMs.coerceAtLeast(0))
     var selectAnchorMs by remember { mutableStateOf<Int?>(null) }
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+    var lastTapMs by remember { mutableStateOf(0L) }
+    var holdFired by remember { mutableStateOf(false) }
+    val holdScope = rememberCoroutineScope()
+    var lastTapX by remember { mutableStateOf(0f) }
+    var preTapMs by remember { mutableStateOf(0) }
+    val holdTimeout = androidx.compose.ui.platform.LocalViewConfiguration.current.longPressTimeoutMillis
     val barDescription = contentDescription
     Canvas(
         modifier = modifier
@@ -1343,11 +1362,59 @@ private fun WaveformBar(
             .testTag("waveform_bar")
             .semantics { this.contentDescription = barDescription }
             .pointerInput(durationMs, peaks) {
-                detectTapGestures { offset ->
-                    val ms = xToMs(offset.x, size.width.toFloat()).toFloat()
-                    onSeekPreview(ms)
-                    onSeekFinished()
+                detectTapGestures(
+                    onPress = { offset ->
+                        val job = holdScope.launch {
+                            kotlinx.coroutines.delay(holdTimeout)
+                            holdFired = true
+                            haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                            val dir = if (offset.x < size.width / 2f) -1 else 1
+                            while (true) {
+                                onHoldTick(dir)
+                                kotlinx.coroutines.delay(HOLD_TICK_MS)
+                            }
+                        }
+                        tryAwaitRelease()
+                        job.cancel()
+                    },
+                    onTap = { offset ->
+                    val w = size.width.toFloat()
+                    val vc = viewConfiguration
+                    if (holdFired) {
+                        holdFired = false
+                    } else if (android.os.SystemClock.uptimeMillis() - lastTapMs <= vc.doubleTapTimeoutMillis &&
+                        kotlin.math.abs(offset.x - lastTapX) <= vc.touchSlop
+                    ) {
+                        lastTapMs = 0L
+                        haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
+                        val upper = durationMs.coerceAtLeast(0)
+                        when {
+                            offset.x < w / 3f -> {
+                                val t = (preTapMs - 5_000).coerceIn(0, upper)
+                                onSeekPreview(t.toFloat())
+                                onSeekFinished()
+                            }
+                            offset.x > 2f * w / 3f -> {
+                                val t = (preTapMs + 5_000).coerceIn(0, upper)
+                                onSeekPreview(t.toFloat())
+                                onSeekFinished()
+                            }
+                            else -> {
+                                onSeekPreview(preTapMs.toFloat())
+                                onSeekFinished()
+                                onPlayPause()
+                            }
+                        }
+                    } else {
+                        lastTapMs = android.os.SystemClock.uptimeMillis()
+                        lastTapX = offset.x
+                        preTapMs = positionMs
+                        val ms = xToMs(offset.x, w).toFloat()
+                        onSeekPreview(ms)
+                        onSeekFinished()
+                    }
                 }
+            )
             }
             .pointerInput(durationMs, peaks, selectingLoop) {
                 detectHorizontalDragGestures(
@@ -1358,6 +1425,7 @@ private fun WaveformBar(
                     onDragCancel = { selectAnchorMs = null },
                     onHorizontalDrag = { change, _ ->
                         change.consume()
+                        holdFired = false
                         if (selectingLoop) {
                             val anchor = selectAnchorMs
                             if (anchor != null) {
@@ -1423,6 +1491,7 @@ private fun PlayerCard(
     loopArmed: Boolean = false,
     onLoopToggle: () -> Unit = {},
     onLoopSelect: (Int, Int) -> Unit = { _, _ -> },
+    onHoldTick: (Int) -> Unit = {},
 ) {
         ElevatedCard(
             modifier = modifier.testTag("player_card"),
@@ -1538,7 +1607,9 @@ private fun PlayerCard(
                                 if (loopArmed) append(", selecione o laço arrastando")
                                 loopRangeMs?.let { append(", laço de ${formatTime(it.first)}→${formatTime(it.second)}") }
                             },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth(),
+                            onPlayPause = onPlayPause,
+                            onHoldTick = onHoldTick
                         )
                     }
                 }
