@@ -80,7 +80,7 @@ class OpenRouterTranscriptionProvider(
         val response = try {
             if (useVerbose) {
                 try {
-                    doTranscribe("verbose_json", listOf("segment"))
+                    doTranscribe("verbose_json", listOf("segment", "word"))
                 } catch (e: Exception) {
                     val body = (e as? retrofit2.HttpException)?.let { httpErrorBody(it) } ?: ""
                     android.util.Log.e("OpenRouterSTT", "verbose_json failed model=${request.model} body=$body err=${e.message}")
@@ -138,7 +138,7 @@ class OpenRouterTranscriptionProvider(
             return Result.failure(IllegalStateException("O OpenRouter não retornou nenhum texto para esta transcrição."))
         }
 
-        val rawSegments = response.segments
+        val rawSegments = response.segments?.let { com.example.data.SegmentUtils.attachWords(it, response.words) }
         val durationMs = response.duration?.let { (it * 1000).toInt() }
         val hallucinationAggressive = prefs.getBoolean("hallucination_aggressive", false)
         val hallucinationThreshold = prefs.getFloat("hallucination_threshold", 0.5f)

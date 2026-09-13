@@ -38,6 +38,7 @@ data class Segment(
     @Json(name = "start") val start: Double,
     @Json(name = "end") val end: Double,
     @Json(name = "text") val text: String,
+    @Json(name = "words") val words: List<Word> = emptyList(),
     @Json(name = "temperature") val temperature: Double? = null,
 )
 

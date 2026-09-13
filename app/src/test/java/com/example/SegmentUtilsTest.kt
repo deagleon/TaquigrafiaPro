@@ -3,6 +3,9 @@ package com.example
 import com.example.data.SegmentUtils
 import com.example.data.TimedParagraph
 import com.example.data.api.Segment
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.SpanStyle
+import com.example.data.api.Word
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -290,5 +293,81 @@ class SegmentUtilsTest {
         assertEquals(5000, timed[0].endMs)
         assertEquals(5000, timed[1].startMs)
         assertEquals(18000, timed[1].endMs)
+    }
+    private fun w(text: String, start: Double, end: Double) = Word(word = text, start = start, end = end)
+
+    @Test
+    fun `attachWords nests words inside their segment spans`() {
+        val segs = listOf(
+            seg(0, 0.0, 10.0, "alpha beta"),
+            seg(1, 10.0, 20.0, "gama")
+        )
+        val words = listOf(w("alpha", 0.0, 5.0), w("beta", 5.0, 10.0), w("gama", 10.0, 20.0), w("stray", 30.0, 35.0))
+        val attached = SegmentUtils.attachWords(segs, words)
+        assertEquals(2, attached.size)
+        assertEquals(listOf("alpha", "beta"), attached[0].words.map { it.word })
+        assertEquals(listOf("gama"), attached[1].words.map { it.word })
+    }
+
+    @Test
+    fun `attachWords leaves segments untouched without words`() {
+        val segs = alignmentSegs()
+        assertTrue(SegmentUtils.attachWords(segs, null).all { it.words.isEmpty() })
+        assertTrue(SegmentUtils.attachWords(segs, emptyList()).all { it.words.isEmpty() })
+    }
+
+    @Test
+    fun `findActiveWordIndex mirrors paragraph gap semantics`() {
+        val words = listOf(w("alpha", 0.0, 5.0), w("beta", 6.0, 12.0))
+        assertEquals(0, SegmentUtils.findActiveWordIndex(2500, words))
+        assertEquals(0, SegmentUtils.findActiveWordIndex(5500, words))
+        assertEquals(1, SegmentUtils.findActiveWordIndex(5900, words))
+        assertEquals(1, SegmentUtils.findActiveWordIndex(12000, words))
+        assertEquals(-1, SegmentUtils.findActiveWordIndex(3000, emptyList()))
+    }
+
+    @Test
+    fun `buildWordAnnotated highlights only the active word`() {
+        val words = listOf(w("alpha", 0.0, 5.0), w("beta", 5.0, 10.0))
+        val hl = SpanStyle(background = Color.Red)
+        val annotated = SegmentUtils.buildWordAnnotated("alpha beta", words, 1, hl)
+        assertNotNull(annotated)
+        assertEquals("alpha beta", annotated!!.text)
+        assertEquals(1, annotated.spanStyles.size)
+        val span = annotated.spanStyles.single()
+        assertEquals(hl, span.item)
+        assertEquals(6, span.start)
+        assertEquals(10, span.end)
+    }
+
+    @Test
+    fun `buildWordAnnotated returns null when unusable`() {
+        val words = listOf(w("alpha", 0.0, 5.0), w("beta", 5.0, 10.0))
+        val hl = SpanStyle(background = Color.Red)
+        assertNull(SegmentUtils.buildWordAnnotated("alpha gama", words, 1, hl))
+        assertNull(SegmentUtils.buildWordAnnotated("alpha beta", emptyList(), 0, hl))
+        assertNull(SegmentUtils.buildWordAnnotated("alpha beta", words, -1, hl))
+        assertNull(SegmentUtils.buildWordAnnotated("alpha beta", words, 5, hl))
+    }
+
+    @Test
+    fun `buildTimedParagraphs carries words on exact count`() {
+        val paras = listOf("Abertura.", "Encerra.")
+        val segs = listOf(
+            seg(0, 0.0, 5.0, "Abertura.").copy(words = listOf(w("Abertura.", 0.0, 5.0))),
+            seg(1, 5.0, 12.0, "Encerra.").copy(words = listOf(w("Encerra.", 5.0, 12.0)))
+        )
+        val timed = SegmentUtils.buildTimedParagraphs(paras, segs, 12_000)
+        assertEquals(listOf("Abertura."), timed[0].words.map { it.word })
+        assertEquals(listOf("Encerra."), timed[1].words.map { it.word })
+    }
+
+    @Test
+    fun `segmentsFromJson reads legacy payload without words`() {
+        val legacy = """[{"id":0,"seek":0,"start":0.0,"end":5.0,"text":"Abertura."}]"""
+        val parsed = SegmentUtils.segmentsFromJson(legacy)
+        assertNotNull(parsed)
+        assertEquals(1, parsed!!.size)
+        assertTrue(parsed[0].words.isEmpty())
     }
 }

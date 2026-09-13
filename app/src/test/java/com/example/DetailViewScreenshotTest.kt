@@ -209,6 +209,29 @@ class DetailViewScreenshotTest {
     composeTestRule.onNodeWithText("00:05 / 05:26").assertExists()
   }
 
+  @Test fun `paragraph with word timings renders full text`() {
+    val segmentsJson = """[{"id":0,"seek":0,"start":0.0,"end":30.0,"text":"alpha beta gama","words":[{"word":"alpha","start":0.0,"end":10.0},{"word":"beta","start":10.0,"end":20.0},{"word":"gama","start":20.0,"end":30.0}]}]"""
+    val entity = TranscriptionEntity(
+      title = "Test words",
+      fileName = "test.mp3",
+      fileSize = 1234L,
+      mimeType = "audio/mpeg",
+      transcriptText = "alpha beta gama",
+      modelUsed = "test-model",
+      audioDurationMs = 30_000,
+      audioUri = null,
+      segmentsJson = segmentsJson
+    )
+    composeTestRule.setContent {
+      MyApplicationTheme {
+        DetailView(entity = entity, onDelete = {}, onRename = {}, onUpdateText = {})
+      }
+    }
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("paragraph_0").assertExists()
+    composeTestRule.onNodeWithText("alpha beta gama").assertExists()
+  }
+
   private fun showEditor(onUpdateText: (String) -> Unit = {}) {
     composeTestRule.setContent {
       MyApplicationTheme {

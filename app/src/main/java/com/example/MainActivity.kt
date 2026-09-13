@@ -976,6 +976,12 @@ fun DetailView(
             SegmentUtils.findActiveIndex(currentPosition, timedParagraphs)
         }
     }
+    val activeWordIdx by remember {
+        derivedStateOf {
+            timedParagraphs.getOrNull(activeIdx)?.words
+                ?.let { SegmentUtils.findActiveWordIndex(currentPosition, it) } ?: -1
+        }
+    }
 
     var isExpanded by remember { mutableStateOf(false) }
     val isImeVisible = WindowInsets.isImeVisible
@@ -1209,6 +1215,7 @@ fun DetailView(
             isImeVisible = isImeVisible,
             timedParagraphs = timedParagraphs,
             activeIdx = activeIdx,
+            activeWordIdx = activeWordIdx,
             listState = listState,
             editableParas = editableParas,
             onTextChange = { raw ->
@@ -1375,6 +1382,7 @@ private fun TranscriptEditor(
     isImeVisible: Boolean,
     timedParagraphs: List<TimedParagraph>,
     activeIdx: Int,
+    activeWordIdx: Int = -1,
     listState: LazyListState,
     editableParas: List<String>,
     onTextChange: (String) -> Unit,
@@ -1505,8 +1513,21 @@ private fun TranscriptEditor(
                             val isActive = idx == activeIdx
                             val bg = if (isActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f) else Color.Transparent
                             val tc = if (isActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                            val displayText = if (isActive && para.words.isNotEmpty()) {
+                                SegmentUtils.buildWordAnnotated(
+                                    para.text,
+                                    para.words,
+                                    activeWordIdx,
+                                    androidx.compose.ui.text.SpanStyle(
+                                        background = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                                    )
+                                ) ?: androidx.compose.ui.text.AnnotatedString(para.text)
+                            } else {
+                                androidx.compose.ui.text.AnnotatedString(para.text)
+                            }
                             Text(
-                                text = para.text,
+                                text = displayText,
                                 fontSize = 15.sp,
                                 lineHeight = 22.sp,
                                 fontFamily = FontFamily.SansSerif,

@@ -1,15 +1,19 @@
 package com.example.data
 
 import com.example.data.api.Segment
+import com.example.data.api.Word
 import java.util.Locale
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 
 data class TimedParagraph(
     val text: String,
     val startMs: Int,
     val endMs: Int,
+    val words: List<Word> = emptyList(),
 )
 
 object SegmentUtils {
@@ -383,7 +387,8 @@ object SegmentUtils {
                 TimedParagraph(
                     text = text,
                     startMs = (seg.start * 1000).toInt().coerceAtLeast(0),
-                    endMs = (seg.end * 1000).toInt().coerceAtLeast(0)
+                    endMs = (seg.end * 1000).toInt().coerceAtLeast(0),
+                    words = seg.words
                 )
             }
         }
@@ -576,5 +581,40 @@ object SegmentUtils {
             }
         }
         return out
+    }
+
+    /** Nests provider word timings into their segment spans; stray words are dropped. */
+    fun attachWords(segments: List<Segment>, words: List<Word>?): List<Segment> {
+        if (words.isNullOrEmpty()) return segments
+        return segments.map { seg ->
+            seg.copy(words = words.filter { it.start >= seg.start && it.end <= seg.end })
+        }
+    }
+
+    /** Active word for [posMs], mirroring paragraph gap semantics; -1 when unusable. */
+    fun findActiveWordIndex(posMs: Int, words: List<Word>): Int {
+        if (words.isEmpty()) return -1
+        val items = words.map {
+            TimedParagraph(it.word, (it.start * 1000).toInt(), (it.end * 1000).toInt())
+        }
+        return findActiveIndex(posMs, items)
+    }
+
+    fun buildWordAnnotated(base: String, words: List<Word>, activeIdx: Int, highlight: SpanStyle): AnnotatedString? {
+        if (words.isEmpty() || activeIdx !in words.indices) return null
+        val ranges = mutableListOf<Pair<Int, Int>>()
+        var cursor = 0
+        for (w in words) {
+            val found = base.indexOf(w.word, cursor, ignoreCase = true)
+            if (found < 0) return null
+            ranges.add(found to found + w.word.length)
+            cursor = found + w.word.length
+        }
+        return androidx.compose.ui.text.buildAnnotatedString {
+            append(base)
+            ranges.forEachIndexed { i, (s, e) ->
+                if (i == activeIdx) addStyle(highlight, s, e)
+            }
+        }
     }
 }
