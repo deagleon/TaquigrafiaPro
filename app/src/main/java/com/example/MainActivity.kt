@@ -1166,11 +1166,26 @@ fun DetailView(
             Spacer(modifier = Modifier.height(8.dp))
         }
 
-        fun persistEdits() {
+        fun persistEdits(silent: Boolean = false) {
             val joined = editableParas.joinToString("\n\n")
             onUpdateText(joined)
             hasUnsavedChanges = false
-            Toast.makeText(context, "Transcrição salva!", Toast.LENGTH_SHORT).show()
+            if (!silent) Toast.makeText(context, "Transcrição salva!", Toast.LENGTH_SHORT).show()
+        }
+
+        // Autosave: typing restarts the clock, pausing saves silently.
+        LaunchedEffect(editableParas.toList()) {
+            if (hasUnsavedChanges) {
+                kotlinx.coroutines.delay(AUTOSAVE_DEBOUNCE_MS)
+                if (hasUnsavedChanges) persistEdits(silent = true)
+            }
+        }
+
+        // Leaving the screen with a pending edit never loses text. Silent: the
+        // write is idempotent (same text re-saved), so a key-change dispose
+        // right after a save costs one redundant identical update, no toast.
+        DisposableEffect(hasUnsavedChanges) {
+            onDispose { if (hasUnsavedChanges) persistEdits(silent = true) }
         }
 
         TranscriptEditor(
@@ -1186,14 +1201,12 @@ fun DetailView(
             activeIdx = activeIdx,
             listState = listState,
             editableParas = editableParas,
-            hasUnsavedChanges = hasUnsavedChanges,
             onTextChange = { raw ->
                 val paras = if (raw.isEmpty()) listOf("") else raw.split("\n\n")
                 editableParas.clear()
                 editableParas.addAll(paras)
                 hasUnsavedChanges = true
             },
-            onSave = ::persistEdits,
             onCloseEditor = {
                 if (hasUnsavedChanges) persistEdits()
                 isExpanded = false
@@ -1215,6 +1228,7 @@ fun DetailView(
     }
 }
 private val PLAYBACK_SPEEDS = listOf(0.75f, 1f, 1.25f, 1.5f)
+private const val AUTOSAVE_DEBOUNCE_MS = 2000L
 
 private fun formatSpeed(speed: Float): String =
     if (speed == speed.toInt().toFloat()) "${speed.toInt()}x" else "${speed}x"
@@ -1348,9 +1362,7 @@ private fun TranscriptEditor(
     activeIdx: Int,
     listState: LazyListState,
     editableParas: List<String>,
-    hasUnsavedChanges: Boolean,
     onTextChange: (String) -> Unit,
-    onSave: () -> Unit,
     onCloseEditor: () -> Unit,
     onParagraphClick: (TimedParagraph) -> Unit,
 ) {
@@ -1373,13 +1385,6 @@ private fun TranscriptEditor(
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                         if (isExpanded) {
-                            if (hasUnsavedChanges) {
-                                TextButton(
-                                    onClick = onSave,
-                                    modifier = Modifier.testTag("save_edit_button"),
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                                ) { Text("Salvar", fontSize = 12.sp) }
-                            }
                             IconButton(
                                 onClick = onCloseEditor,
                                 modifier = Modifier.size(28.dp).testTag("expand_text_button")

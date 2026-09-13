@@ -9,6 +9,11 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.performTextInput
+import org.junit.Assert.assertTrue
 import org.robolectric.shadows.ShadowMediaPlayer
 import org.robolectric.shadows.util.DataSource
 import com.example.data.SegmentUtils
@@ -140,5 +145,52 @@ class DetailViewScreenshotTest {
     composeTestRule.onNodeWithTag("speed_button").performClick()
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithText("1.25x", substring = true).assertExists()
+  }
+  private fun showEditor(onUpdateText: (String) -> Unit = {}) {
+    composeTestRule.setContent {
+      MyApplicationTheme {
+        DetailView(entity = entityWithAudio(), onDelete = {}, onRename = {}, onUpdateText = onUpdateText)
+      }
+    }
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("expand_text_button").performClick()
+    composeTestRule.waitForIdle()
+  }
+
+  @Test fun `typing then pausing autosaves without pressing any button`() {
+    val saved = mutableListOf<String>()
+    showEditor(onUpdateText = { saved.add(it) })
+    composeTestRule.onNodeWithTag("expanded_text_field").performTextInput(" mais")
+    composeTestRule.mainClock.advanceTimeBy(2_500)
+    composeTestRule.waitForIdle()
+    assertTrue("expected autosave after pause, got $saved", saved.isNotEmpty())
+    assertTrue(saved.last().contains("mais"))
+    assertTrue(saved.last().contains("Parágrafo um"))
+  }
+
+  @Test fun `manual save button is gone in edit mode`() {
+    showEditor()
+    composeTestRule.onNodeWithTag("expanded_text_field").performTextInput(" mais")
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("save_edit_button").assertDoesNotExist()
+  }
+  @Test fun `leaving screen with pending edit saves`() {
+    val saved = mutableListOf<String>()
+    var show by mutableStateOf(true)
+    composeTestRule.setContent {
+      MyApplicationTheme {
+        if (show) {
+          DetailView(entity = entityWithAudio(), onDelete = {}, onRename = {}, onUpdateText = { saved.add(it) })
+        }
+      }
+    }
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("expand_text_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("expanded_text_field").performTextInput(" x")
+    show = false
+    composeTestRule.waitForIdle()
+    assertTrue("expected save on leave, got $saved", saved.isNotEmpty())
+    assertTrue(saved.last().contains("x"))
   }
 }
