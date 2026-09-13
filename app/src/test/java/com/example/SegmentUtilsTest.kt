@@ -235,4 +235,60 @@ class SegmentUtilsTest {
 
     private fun seg(id: Int, start: Double, end: Double, text: String) =
         Segment(id = id, seek = 0, start = start, end = end, text = text)
+
+    private fun alignmentSegs() = listOf(
+        seg(0, 0.0, 5.0, "Abertura."),
+        seg(1, 5.0, 12.0, "Vota sim vereador."),
+        seg(2, 12.0, 18.0, "Encerra.")
+    )
+    @Test
+    fun `alignTimedParagraphs anchors matched trechos to exact segment spans`() {
+        val paras = listOf("Abertura.", "Vota sim vereador Encerra.")
+        val segs = alignmentSegs()
+        val timed = SegmentUtils.alignTimedParagraphs(paras, segs, 18_000)
+        assertNotNull(timed)
+        assertEquals(2, timed!!.size)
+        assertEquals(0, timed[0].startMs)
+        assertEquals(5000, timed[0].endMs)
+        assertEquals(5000, timed[1].startMs)
+        assertEquals(18000, timed[1].endMs)
+    }
+
+    @Test
+    fun `alignTimedParagraphs interpolates unmatched trecho inside the gap`() {
+        val paras = listOf("Abertura.", "Algo novo sem áudio.", "Encerra.")
+        val segs = alignmentSegs()
+        val timed = SegmentUtils.alignTimedParagraphs(paras, segs, 18_000)
+        assertNotNull(timed)
+        assertEquals(3, timed!!.size)
+        assertEquals(0, timed[0].startMs)
+        assertEquals(5000, timed[0].endMs)
+        assertEquals(5000, timed[1].startMs)
+        assertEquals(12000, timed[1].endMs)
+        assertEquals(12000, timed[2].startMs)
+        assertEquals(18000, timed[2].endMs)
+    }
+
+    @Test
+    fun `alignTimedParagraphs returns null when nothing anchors`() {
+        val paras = listOf("Texto totalmente diferente.", "Nada a ver com os segmentos.")
+        val segs = listOf(
+            seg(0, 0.0, 5.0, "Abertura."),
+            seg(1, 5.0, 12.0, "Vota sim vereador.")
+        )
+        assertNull(SegmentUtils.alignTimedParagraphs(paras, segs, 12_000))
+        assertNull(SegmentUtils.alignTimedParagraphs(paras, null, 12_000))
+    }
+
+    @Test
+    fun `buildTimedParagraphs uses exact spans when dedup merges trechos`() {
+        val paras = listOf("Abertura.", "Vota sim vereador Encerra.")
+        val segs = alignmentSegs()
+        val timed = SegmentUtils.buildTimedParagraphs(paras, segs, 18_000)
+        assertEquals(2, timed.size)
+        assertEquals(0, timed[0].startMs)
+        assertEquals(5000, timed[0].endMs)
+        assertEquals(5000, timed[1].startMs)
+        assertEquals(18000, timed[1].endMs)
+    }
 }

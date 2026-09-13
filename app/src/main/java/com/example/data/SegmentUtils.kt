@@ -385,11 +385,13 @@ object SegmentUtils {
             }
         }
 
-        // If clean segments exist but paragraph count differs (e.g. grouped text)
+        // If clean segments exist but paragraph count differs (e.g. grouped text),
+        // anchor trechos to real segment spans by text and interpolate the rest.
         if (!cleanSegs.isNullOrEmpty()) {
             val totalSegDuration = (cleanSegs.last().end * 1000).toInt().coerceAtLeast(1000)
             val effectiveDuration = audioDurationMs?.coerceAtLeast(1000) ?: totalSegDuration
-            return buildEstimatedTimedParagraphs(paras, effectiveDuration)
+            return alignTimedParagraphs(paras, cleanSegs, effectiveDuration)
+                ?: buildEstimatedTimedParagraphs(paras, effectiveDuration)
         }
 
         // Proportional estimation based on audio duration and word count
@@ -509,3 +511,72 @@ import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
         }
         return realigned
     }
+    /**
+     * Maps [paras] onto the real ASR timeline by anchoring each trecho to the contiguous
+     * run of segments whose text it contains. Anchored trechos keep exact segment spans;
+     * unanchored ones split the gap between neighboring anchors proportionally by word
+     * count. Returns null when no trecho anchors, so the caller keeps proportional
+     * estimation over the whole duration.
+     */
+    fun alignTimedParagraphs(
+        paras: List<String>,
+        segments: List<Segment>?,
+        totalDurationMs: Int
+    ): List<TimedParagraph>? {
+        val clean = cleanAndDeduplicate(segments) ?: return null
+        if (paras.isEmpty() || clean.isEmpty()) return null
+        val normParas = paras.map { normalizeForComparison(it) }
+        val normSegs = clean.map { normalizeForComparison(it.text) }
+
+        // First pass: anchor trechos to contiguous contained segment runs.
+        val spans = arrayOfNulls<Pair<Int, Int>>(paras.size)
+        var segIdx = 0
+        for (i in paras.indices) {
+            if (normParas[i].isBlank()) continue
+            var j = segIdx
+            while (j < clean.size && !normParas[i].contains(normSegs[j])) j++
+            if (j >= clean.size) continue
+            var k = j
+            while (k + 1 < clean.size && normParas[i].contains(normSegs[k + 1])) k++
+            spans[i] = Pair(
+                (clean[j].start * 1000).toInt().coerceAtLeast(0),
+                (clean[k].end * 1000).toInt().coerceAtLeast(0)
+            )
+            segIdx = k + 1
+        }
+        if (spans.all { it == null }) return null
+
+        // Second pass: anchored spans stay exact, gaps split by word count.
+        val out = mutableListOf<TimedParagraph>()
+        var i = 0
+        var cursor = 0
+        while (i < paras.size) {
+            val span = spans[i]
+            if (span != null) {
+                val start = span.first.coerceAtLeast(cursor)
+                val end = span.second.coerceAtLeast(start)
+                out.add(TimedParagraph(paras[i], start, end))
+                cursor = end
+                i++
+            } else {
+                var j = i
+                while (j < paras.size && spans[j] == null) j++
+                val runStart = cursor
+                val runEnd = if (j < paras.size) spans[j]!!.first.coerceAtLeast(cursor) else totalDurationMs.coerceAtLeast(cursor)
+                val run = paras.subList(i, j)
+                val words = run.map { p -> p.split(Regex("\\s+")).count { w -> w.isNotBlank() }.coerceAtLeast(1) }
+                val totalWords = words.sum()
+                var acc = runStart
+                run.forEachIndexed { k, text ->
+                    val dur = if (k == run.lastIndex) runEnd - acc
+                    else ((words[k].toFloat() / totalWords) * (runEnd - runStart)).toInt()
+                    out.add(TimedParagraph(text, acc, (acc + dur).coerceAtMost(runEnd)))
+                    acc += dur
+                }
+                cursor = runEnd
+                i = j
+            }
+        }
+        return out
+    }
+}

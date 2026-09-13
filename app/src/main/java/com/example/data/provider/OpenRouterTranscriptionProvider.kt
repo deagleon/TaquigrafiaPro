@@ -254,6 +254,13 @@ class OpenRouterTranscriptionProvider(
             processedTrimmed
         } else processed
 
-        return Result.success(TranscriptionResult(text = finalProcessed, segments = segments, durationMs = durationMs, language = response.language))
+        // O texto reescrito pelo LLM não corresponde mais aos segmentos originais:
+        // realinha (ou descarta com null honesto) em vez de devolver precisão falsa.
+        val processedSegments = com.example.data.SegmentUtils.realignSegments(
+            com.example.data.SegmentUtils.splitParagraphs(cleanRawTranscript),
+            com.example.data.SegmentUtils.splitParagraphs(finalProcessed),
+            segments
+        )
+        return Result.success(TranscriptionResult(text = finalProcessed, segments = processedSegments, durationMs = durationMs, language = response.language))
     }
 }
