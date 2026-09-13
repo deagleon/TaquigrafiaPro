@@ -46,6 +46,7 @@ import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
@@ -1070,108 +1071,43 @@ fun DetailView(
         if (!isExpanded) Spacer(modifier = Modifier.height(8.dp))
 
         if (!isExpanded || !isImeVisible) {
-        ElevatedCard(
-            modifier = Modifier
-                .fillMaxWidth()
-                .widthIn(max = 600.dp),
-            colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-            shape = MaterialTheme.shapes.medium,
-            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Text(
-                    text = "Acompanhar Áudio Original",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                
-                if (audioInitError != null) {
-                    Text(
-                        text = audioInitError ?: "",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
-                    )
-                } else {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        IconButton(
-                            onClick = {
-                                val mp = mediaPlayer
-                                if (mp == null) {
-                                    Toast.makeText(context, audioInitError ?: "Áudio não carregado (emulador sem áudio: -no-audio). Arquivo salvo em disco.", Toast.LENGTH_LONG).show()
-                                    return@IconButton
-                                }
-                                try {
-                                    val playing = try { mp.isPlaying } catch (_: IllegalStateException) { false }
-                                    if (playing) { try { mp.pause() } catch (_: Exception) {}; isPlaying = false }
-                                    else { try { mp.start(); isPlaying = true } catch (e: Exception) { e.printStackTrace(); Toast.makeText(context, "Falha ao iniciar áudio: ${e.message} (emulador foi iniciado com -no-audio)", Toast.LENGTH_LONG).show() } }
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                    Toast.makeText(context, "Erro ao controlar áudio: ${e.message}", Toast.LENGTH_SHORT).show()
-                                }
-                            },
-                            modifier = Modifier
-                                .size(36.dp)
-                                .background(MaterialTheme.colorScheme.primary, shape = CircleShape)
-                        ) {
-                            if (isPlaying) {
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Box(modifier = Modifier.size(width = 4.dp, height = 12.dp).background(MaterialTheme.colorScheme.onPrimary))
-                                    Box(modifier = Modifier.size(width = 4.dp, height = 12.dp).background(MaterialTheme.colorScheme.onPrimary))
-                                }
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Default.PlayArrow,
-                                    contentDescription = "Tocar",
-                                    tint = MaterialTheme.colorScheme.onPrimary,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
+            PlayerCard(
+                modifier = Modifier.fillMaxWidth().widthIn(max = 600.dp),
+                isPlaying = isPlaying,
+                currentPosition = currentPosition,
+                duration = duration,
+                audioInitError = audioInitError,
+                sliderDragging = sliderDragging,
+                dragValue = dragValue,
+                formatTime = ::formatTime,
+                onPlayPause = {
+                    val mp = mediaPlayer
+                    if (mp == null) {
+                        Toast.makeText(context, audioInitError ?: "Áudio não carregado (emulador sem áudio: -no-audio). Arquivo salvo em disco.", Toast.LENGTH_LONG).show()
+                    } else {
+                        try {
+                            val playing = try { mp.isPlaying } catch (_: IllegalStateException) { false }
+                            if (playing) { try { mp.pause() } catch (_: Exception) {}; isPlaying = false }
+                            else { try { mp.start(); isPlaying = true } catch (e: Exception) { e.printStackTrace(); Toast.makeText(context, "Falha ao iniciar áudio: ${e.message} (emulador foi iniciado com -no-audio)", Toast.LENGTH_LONG).show() } }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                            Toast.makeText(context, "Erro ao controlar áudio: ${e.message}", Toast.LENGTH_SHORT).show()
                         }
-
-                        Spacer(modifier = Modifier.width(12.dp))
-
-                        Slider(
-                            value = if (sliderDragging) dragValue else currentPosition.toFloat(),
-                            onValueChange = { newValue ->
-                                sliderDragging = true
-                                isUserSeeking = true
-                                dragValue = newValue
-                                currentPosition = newValue.toInt()
-                            },
-                            onValueChangeFinished = {
-                                sliderDragging = false
-                                isUserSeeking = false
-                                currentPosition = dragValue.toInt()
-                                try { mediaPlayer?.seekTo(dragValue.toInt()) } catch (e: Exception) { e.printStackTrace() }
-                            },
-                            valueRange = 0f..(if (duration > 0) duration.toFloat() else 100f),
-                            modifier = Modifier.weight(1f),
-                            colors = SliderDefaults.colors(
-                                thumbColor = MaterialTheme.colorScheme.primary,
-                                activeTrackColor = MaterialTheme.colorScheme.primary,
-                                inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.24f)
-                            )
-                        )
-
-                        Spacer(modifier = Modifier.width(12.dp))
-
-                        Text(
-                            text = "${formatTime(currentPosition)} / ${formatTime(duration)}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                     }
+                },
+                onSeekPreview = { newValue ->
+                    sliderDragging = true
+                    isUserSeeking = true
+                    dragValue = newValue
+                    currentPosition = newValue.toInt()
+                },
+                onSeekFinished = {
+                    sliderDragging = false
+                    isUserSeeking = false
+                    currentPosition = dragValue.toInt()
+                    try { mediaPlayer?.seekTo(dragValue.toInt()) } catch (e: Exception) { e.printStackTrace() }
                 }
-            }
-        }
+            )
         }
 
         if (!isExpanded) {
@@ -1215,12 +1151,156 @@ fun DetailView(
             Toast.makeText(context, "Transcrição salva!", Toast.LENGTH_SHORT).show()
         }
 
-        ElevatedCard(
+        TranscriptEditor(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
                 .widthIn(max = 600.dp)
                 .then(if (isExpanded && isImeVisible) Modifier.padding(bottom = 4.dp) else Modifier),
+            isExpanded = isExpanded,
+            onExpandedChange = { isExpanded = it },
+            isImeVisible = isImeVisible,
+            timedParagraphs = timedParagraphs,
+            activeIdx = activeIdx,
+            listState = listState,
+            editableParas = editableParas,
+            hasUnsavedChanges = hasUnsavedChanges,
+            onTextChange = { raw ->
+                val paras = if (raw.isEmpty()) listOf("") else raw.split("\n\n")
+                editableParas.clear()
+                editableParas.addAll(paras)
+                hasUnsavedChanges = true
+            },
+            onSave = ::persistEdits,
+            onCloseEditor = {
+                if (hasUnsavedChanges) persistEdits()
+                isExpanded = false
+            },
+            onParagraphClick = { para ->
+                try {
+                    currentPosition = para.startMs
+                    mediaPlayer?.seekTo(para.startMs)
+                    val mp = mediaPlayer
+                    if (mp != null && !isPlaying) {
+                        try { mp.start(); isPlaying = true } catch (_: Exception) {}
+                    }
+                } catch (_: Exception) {
+                    currentPosition = para.startMs
+                }
+            }
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+    }
+}
+@Composable
+private fun PlayerCard(
+    modifier: Modifier = Modifier,
+    isPlaying: Boolean,
+    currentPosition: Int,
+    duration: Int,
+    audioInitError: String?,
+    sliderDragging: Boolean,
+    dragValue: Float,
+    formatTime: (Int) -> String,
+    onPlayPause: () -> Unit,
+    onSeekPreview: (Float) -> Unit,
+    onSeekFinished: () -> Unit,
+) {
+        ElevatedCard(
+            modifier = modifier,
+            colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+            shape = MaterialTheme.shapes.medium,
+            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = "Acompanhar Áudio Original",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                
+                if (audioInitError != null) {
+                    Text(
+                        text = audioInitError ?: "",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+                    )
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = onPlayPause,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .background(MaterialTheme.colorScheme.primary, shape = CircleShape)
+                        ) {
+                            if (isPlaying) {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(modifier = Modifier.size(width = 4.dp, height = 12.dp).background(MaterialTheme.colorScheme.onPrimary))
+                                    Box(modifier = Modifier.size(width = 4.dp, height = 12.dp).background(MaterialTheme.colorScheme.onPrimary))
+                                }
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.PlayArrow,
+                                    contentDescription = "Tocar",
+                                    tint = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        Slider(
+                            value = if (sliderDragging) dragValue else currentPosition.toFloat(),
+                            onValueChange = onSeekPreview,
+                            onValueChangeFinished = onSeekFinished,
+                            valueRange = 0f..(if (duration > 0) duration.toFloat() else 100f),
+                            modifier = Modifier.weight(1f),
+                            colors = SliderDefaults.colors(
+                                thumbColor = MaterialTheme.colorScheme.primary,
+                                activeTrackColor = MaterialTheme.colorScheme.primary,
+                                inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.24f)
+                            )
+                        )
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        Text(
+                            text = "${formatTime(currentPosition)} / ${formatTime(duration)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+}
+@Composable
+private fun TranscriptEditor(
+    modifier: Modifier = Modifier,
+    isExpanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    isImeVisible: Boolean,
+    timedParagraphs: List<TimedParagraph>,
+    activeIdx: Int,
+    listState: LazyListState,
+    editableParas: List<String>,
+    hasUnsavedChanges: Boolean,
+    onTextChange: (String) -> Unit,
+    onSave: () -> Unit,
+    onCloseEditor: () -> Unit,
+    onParagraphClick: (TimedParagraph) -> Unit,
+) {
+        ElevatedCard(
+            modifier = modifier,
             colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
             shape = MaterialTheme.shapes.medium,
             elevation = CardDefaults.elevatedCardElevation(defaultElevation = if (isExpanded && isImeVisible) 0.dp else 1.dp)
@@ -1240,23 +1320,20 @@ fun DetailView(
                         if (isExpanded) {
                             if (hasUnsavedChanges) {
                                 TextButton(
-                                    onClick = { persistEdits() },
+                                    onClick = onSave,
                                     modifier = Modifier.testTag("save_edit_button"),
                                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                                 ) { Text("Salvar", fontSize = 12.sp) }
                             }
                             IconButton(
-                                onClick = {
-                                    if (hasUnsavedChanges) persistEdits()
-                                    isExpanded = false
-                                },
+                                onClick = onCloseEditor,
                                 modifier = Modifier.size(28.dp).testTag("expand_text_button")
                             ) {
                                 Icon(Icons.Default.Close, "Fechar edição", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
                             }
                         } else {
                             IconButton(
-                                onClick = { isExpanded = true },
+                                onClick = { onExpandedChange(true) },
                                 modifier = Modifier.size(32.dp).testTag("expand_text_button")
                             ) {
                                 Icon(Icons.Default.Edit, "Expandir e editar", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
@@ -1322,9 +1399,7 @@ fun DetailView(
                                 onValueChange = { newValue ->
                                     val raw = newValue.text
                                     val paras = if (raw.isEmpty()) listOf("") else raw.split("\n\n")
-                                    editableParas.clear()
-                                    editableParas.addAll(paras)
-                                    hasUnsavedChanges = true
+                                    onTextChange(raw)
                                     val annotated = buildEditAnnotated(paras, activeIdx)
                                     val sel = newValue.selection
                                     val clampedSel = androidx.compose.ui.text.TextRange(
@@ -1366,22 +1441,7 @@ fun DetailView(
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(8.dp))
                                     .background(bg)
-                                    .clickable {
-                                        try {
-                                            val targetMs = para.startMs
-                                            currentPosition = targetMs
-                                            mediaPlayer?.seekTo(targetMs)
-                                            val mp = mediaPlayer
-                                            if (mp != null && !isPlaying) {
-                                                try {
-                                                    mp.start()
-                                                    isPlaying = true
-                                                } catch (_: Exception) {}
-                                            }
-                                        } catch (_: Exception) {
-                                            currentPosition = para.startMs
-                                        }
-                                    }
+                                    .clickable { onParagraphClick(para) }
                                     .padding(horizontal = 8.dp, vertical = 6.dp)
                                     .testTag("paragraph_$idx")
                             )
@@ -1390,9 +1450,6 @@ fun DetailView(
                 }
             }
         }
-        
-        Spacer(modifier = Modifier.height(12.dp))
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
