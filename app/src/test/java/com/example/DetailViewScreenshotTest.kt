@@ -18,6 +18,7 @@ import org.robolectric.shadows.ShadowMediaPlayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipe
+import androidx.compose.ui.test.onNodeWithContentDescription
 import org.robolectric.shadows.util.DataSource
 import com.example.data.SegmentUtils
 import com.example.data.TranscriptionEntity
@@ -293,6 +294,57 @@ class DetailViewScreenshotTest {
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithText("04:53 / 05:26").assertExists()
   }
+  @Test fun `arming shows selection hint`() {
+    showWaveform()
+    composeTestRule.onNodeWithTag("loop_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithContentDescription("selecione o laço", substring = true).assertExists()
+  }
+
+  @Test fun `armed drag marks the loop interval`() {
+    showWaveform()
+    composeTestRule.onNodeWithTag("loop_button").performClick()
+    composeTestRule.waitForIdle()
+    val node = composeTestRule.onNodeWithTag("waveform_bar")
+    val size = node.fetchSemanticsNode().size
+    node.performTouchInput {
+      swipe(
+        Offset(size.width * 0.2f, size.height / 2f),
+        Offset(size.width * 0.4f, size.height / 2f)
+      )
+    }
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithContentDescription("laço de", substring = true).assertExists()
+  }
+
+  @Test fun `tap while armed seeks without looping`() {
+    showWaveform()
+    composeTestRule.onNodeWithTag("loop_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("waveform_bar").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("02:43 / 05:26").assertExists()
+    composeTestRule.onNodeWithContentDescription("laço de", substring = true).assertDoesNotExist()
+  }
+
+  @Test fun `loop button clears the active loop`() {
+    showWaveform()
+    composeTestRule.onNodeWithTag("loop_button").performClick()
+    composeTestRule.waitForIdle()
+    val node = composeTestRule.onNodeWithTag("waveform_bar")
+    val size = node.fetchSemanticsNode().size
+    node.performTouchInput {
+      swipe(
+        Offset(size.width * 0.2f, size.height / 2f),
+        Offset(size.width * 0.4f, size.height / 2f)
+      )
+    }
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("loop_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithContentDescription("laço de", substring = true).assertDoesNotExist()
+  }
+
 
   private fun showEditor(onUpdateText: (String) -> Unit = {}) {
     composeTestRule.setContent {

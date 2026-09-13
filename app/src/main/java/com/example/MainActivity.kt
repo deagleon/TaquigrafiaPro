@@ -71,6 +71,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
@@ -117,6 +118,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -852,6 +856,8 @@ fun DetailView(
     var audioInitError by remember { mutableStateOf<String?>(null) }
     var isUserSeeking by remember { mutableStateOf(false) }
     var sliderDragging by remember { mutableStateOf(false) }
+    var loopArmed by remember { mutableStateOf(false) }
+    var loopRangeMs by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var dragValue by remember { mutableStateOf(0f) }
     var playbackSpeed by remember { mutableStateOf(1f) }
     var pauseAnchorMs by remember { mutableStateOf<Int?>(null) }
@@ -924,6 +930,10 @@ fun DetailView(
                 val playing = try { mp.isPlaying } catch (_: IllegalStateException) { isPlaying = false; break }
                 if (playing) {
                     currentPosition = try { mp.currentPosition } catch (_: Exception) { currentPosition }
+                    loopRepeatTarget(currentPosition, loopRangeMs)?.let { restart ->
+                        try { mp.seekTo(restart) } catch (_: Exception) {}
+                        currentPosition = restart
+                    }
                 } else {
                     isPlaying = false; break
                 }
@@ -1151,6 +1161,22 @@ fun DetailView(
             onSpeedChange = {
                 val idx = PLAYBACK_SPEEDS.indexOf(playbackSpeed).takeIf { it >= 0 } ?: 2
                 playbackSpeed = PLAYBACK_SPEEDS[(idx + 1) % PLAYBACK_SPEEDS.size]
+            },
+            loopRangeMs = loopRangeMs,
+            loopArmed = loopArmed,
+            onLoopToggle = {
+                if (loopRangeMs != null) {
+                    loopRangeMs = null
+                    loopArmed = false
+                } else {
+                    loopArmed = !loopArmed
+                }
+            },
+            onLoopSelect = { a, b ->
+                resolveLoopSelect(a, b)?.let {
+                    loopRangeMs = it
+                    loopArmed = false
+                }
             }
         )
 
@@ -1251,11 +1277,24 @@ fun DetailView(
     }
 }
 private val PLAYBACK_SPEEDS = listOf(0.75f, 0.85f, 1f, 1.15f, 1.25f, 1.5f)
+/** Minimum loop span; shorter drags are not a Laço. */
+private const val MIN_LOOP_SPAN_MS = 500
+
+/** Repeat jump for [posMs] inside [loop], or null to keep playing. */
+internal fun loopRepeatTarget(posMs: Int, loop: Pair<Int, Int>?): Int? =
+    if (loop != null && posMs >= loop.second) loop.first else null
 private const val AUTOSAVE_DEBOUNCE_MS = 2000L
 private const val RETROCESSO_MS = 1500
 
 /** Resume point after a pause: 1.5s of context back, never before zero. */
 internal fun resumeTargetMs(currentMs: Int): Int = (currentMs - RETROCESSO_MS).coerceAtLeast(0)
+
+/** Ordered Laço from a drag, or null when the span is too short to be a loop. */
+internal fun resolveLoopSelect(aMs: Int, bMs: Int): Pair<Int, Int>? {
+    val start = minOf(aMs, bMs)
+    val end = maxOf(aMs, bMs)
+    return if (end - start >= MIN_LOOP_SPAN_MS) start to end else null
+}
 
 private fun formatSpeed(speed: Float): String =
     if (speed == speed.toInt().toFloat()) "${speed.toInt()}x" else "${speed}x"
@@ -1284,17 +1323,25 @@ private fun WaveformBar(
     barHeight: androidx.compose.ui.unit.Dp,
     onSeekPreview: (Float) -> Unit,
     onSeekFinished: () -> Unit,
+    loopRangeMs: Pair<Int, Int>? = null,
+    selectingLoop: Boolean = false,
+    onLoopSelect: (Int, Int) -> Unit = { _, _ -> },
+    contentDescription: String = "Forma de onda",
 ) {
     val playedColor = MaterialTheme.colorScheme.primary
     val unplayedColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
     val playheadColor = MaterialTheme.colorScheme.primary
+    val loopBandColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
     fun xToMs(x: Float, width: Float): Int =
         ((x / width.coerceAtLeast(1f)) * durationMs).toInt().coerceIn(0, durationMs.coerceAtLeast(0))
+    var selectAnchorMs by remember { mutableStateOf<Int?>(null) }
+    val barDescription = contentDescription
     Canvas(
         modifier = modifier
             .fillMaxWidth()
             .height(barHeight)
             .testTag("waveform_bar")
+            .semantics { this.contentDescription = barDescription }
             .pointerInput(durationMs, peaks) {
                 detectTapGestures { offset ->
                     val ms = xToMs(offset.x, size.width.toFloat()).toFloat()
@@ -1302,17 +1349,39 @@ private fun WaveformBar(
                     onSeekFinished()
                 }
             }
-            .pointerInput(durationMs, peaks) {
+            .pointerInput(durationMs, peaks, selectingLoop) {
                 detectHorizontalDragGestures(
-                    onDragEnd = { onSeekFinished() },
+                    onDragStart = { offset ->
+                        if (selectingLoop) selectAnchorMs = xToMs(offset.x, size.width.toFloat())
+                    },
+                    onDragEnd = { selectAnchorMs = null },
+                    onDragCancel = { selectAnchorMs = null },
                     onHorizontalDrag = { change, _ ->
                         change.consume()
-                        onSeekPreview(xToMs(change.position.x, size.width.toFloat()).toFloat())
+                        if (selectingLoop) {
+                            val anchor = selectAnchorMs
+                            if (anchor != null) {
+                                val end = xToMs(change.position.x, size.width.toFloat())
+                                if (kotlin.math.abs(end - anchor) >= MIN_LOOP_SPAN_MS) {
+                                    onLoopSelect(minOf(anchor, end), maxOf(anchor, end))
+                                    selectAnchorMs = null
+                                }
+                            }
+                        } else {
+                            onSeekPreview(xToMs(change.position.x, size.width.toFloat()).toFloat())
+                        }
                     }
                 )
             }
     ) {
         val n = peaks.size
+        loopRangeMs?.let { (loopStart, loopEnd) ->
+            if (durationMs > 0 && loopEnd > loopStart) {
+                val left = (loopStart.toFloat() / durationMs) * size.width
+                val right = (loopEnd.toFloat() / durationMs) * size.width
+                drawRect(loopBandColor, topLeft = Offset(left, 0f), size = Size(right - left, size.height))
+            }
+        }
         val fraction = if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
         val columns = size.width.toInt().coerceAtLeast(1)
         val barW = size.width / columns
@@ -1350,6 +1419,10 @@ private fun PlayerCard(
     onSkip: (Int) -> Unit,
     onSpeedChange: () -> Unit,
     peaks: List<Float>? = null,
+    loopRangeMs: Pair<Int, Int>? = null,
+    loopArmed: Boolean = false,
+    onLoopToggle: () -> Unit = {},
+    onLoopSelect: (Int, Int) -> Unit = { _, _ -> },
 ) {
         ElevatedCard(
             modifier = modifier.testTag("player_card"),
@@ -1436,6 +1509,17 @@ private fun PlayerCard(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         PlayerSmallButton(label = formatSpeed(playbackSpeed), testTag = "speed_button", highlight = playbackSpeed != 1f, onClick = onSpeedChange)
+                        IconButton(
+                            onClick = onLoopToggle,
+                            modifier = Modifier.size(32.dp).testTag("loop_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Repeat,
+                                contentDescription = "Laço",
+                                tint = if (loopRangeMs != null || loopArmed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                     if (peaks != null) {
                         Spacer(modifier = Modifier.height(8.dp))
@@ -1446,6 +1530,14 @@ private fun PlayerCard(
                             barHeight = if (compact) 24.dp else 44.dp,
                             onSeekPreview = onSeekPreview,
                             onSeekFinished = onSeekFinished,
+                            loopRangeMs = loopRangeMs,
+                            selectingLoop = loopArmed,
+                            onLoopSelect = onLoopSelect,
+                            contentDescription = buildString {
+                                append("Forma de onda")
+                                if (loopArmed) append(", selecione o laço arrastando")
+                                loopRangeMs?.let { append(", laço de ${formatTime(it.first)}→${formatTime(it.second)}") }
+                            },
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
