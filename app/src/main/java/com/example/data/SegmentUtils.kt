@@ -428,3 +428,84 @@ object SegmentUtils {
             .trim()
     }
 }
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.Types
+import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+    private val segmentsAdapter: com.squareup.moshi.JsonAdapter<List<Segment>> by lazy {
+        Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
+            .adapter(Types.newParameterizedType(List::class.java, Segment::class.java))
+    }
+    /** Serializes ASR segments for storage, or null when there is nothing to preserve. */
+    fun segmentsToJson(segments: List<Segment>?): String? {
+        if (segments.isNullOrEmpty()) return null
+        return try { segmentsAdapter.toJson(segments) } catch (_: Exception) { null }
+    }
+
+    /** Parses stored ASR segments, or null when absent or unreadable. */
+    fun segmentsFromJson(json: String?): List<Segment>? {
+        if (json.isNullOrBlank()) return null
+        return try { segmentsAdapter.fromJson(json)?.takeIf { it.isNotEmpty() } } catch (_: Exception) { null }
+    }
+
+    /**
+     * Realigns ASR segments from [oldParas] onto [newParas] after a Revisão correction.
+     * Trechos with identical text keep their exact timestamps; only the edited span is
+     * re-estimated proportionally inside its original time bounds. Returns null when the
+     * old segments cannot be mapped (absent, or count diverges from [oldParas]) so the
+     * caller falls back to discarding them.
+     */
+    fun realignSegments(
+        oldParas: List<String>,
+        newParas: List<String>,
+        oldSegments: List<Segment>?
+    ): List<Segment>? {
+        val keptSegments = cleanAndDeduplicate(oldSegments) ?: return null
+        if (keptSegments.size != oldParas.size || newParas.isEmpty()) return null
+
+        var prefix = 0
+        while (prefix < oldParas.size && prefix < newParas.size && oldParas[prefix] == newParas[prefix]) prefix++
+        var suffix = 0
+        while (suffix < oldParas.size - prefix && suffix < newParas.size - prefix &&
+            oldParas[oldParas.size - 1 - suffix] == newParas[newParas.size - 1 - suffix]
+        ) suffix++
+
+        val realigned = mutableListOf<Segment>()
+        for (i in 0 until prefix) realigned.add(keptSegments[i].copy(id = i))
+
+        val oldMidStart = prefix
+        val oldMidEnd = oldParas.size - suffix
+        val newMidStart = prefix
+        val newMidEnd = newParas.size - suffix
+        val spanStartMs: Int
+        val spanEndMs: Int
+        if (oldMidStart < oldMidEnd) {
+            spanStartMs = (keptSegments[oldMidStart].start * 1000).toInt().coerceAtLeast(0)
+            spanEndMs = (keptSegments[oldMidEnd - 1].end * 1000).toInt().coerceAtLeast(spanStartMs)
+        } else {
+            // Pure insertion between two kept trechos: the gap is the span (possibly zero-width).
+            val leftEndMs = if (prefix > 0) (keptSegments[prefix - 1].end * 1000).toInt() else 0
+            val rightStartMs = if (suffix > 0) (keptSegments[oldParas.size - suffix].start * 1000).toInt() else leftEndMs
+            spanStartMs = leftEndMs.coerceAtLeast(0)
+            spanEndMs = rightStartMs.coerceAtLeast(spanStartMs)
+        }
+        if (newMidStart < newMidEnd) {
+            val newMiddle = newParas.subList(newMidStart, newMidEnd)
+            val spanMs = (spanEndMs - spanStartMs).coerceAtLeast(newMiddle.size * 400)
+            buildEstimatedTimedParagraphs(newMiddle, spanMs).forEachIndexed { middleIndex, timed ->
+                realigned.add(
+                    Segment(
+                        id = newMidStart + middleIndex,
+                        seek = 0,
+                        start = (spanStartMs + timed.startMs) / 1000.0,
+                        end = (spanStartMs + timed.endMs) / 1000.0,
+                        text = newMiddle[middleIndex]
+                    )
+                )
+            }
+        }
+        for (suffixOffset in 0 until suffix) {
+            val oldIdx = oldParas.size - suffix + suffixOffset
+            realigned.add(keptSegments[oldIdx].copy(id = newParas.size - suffix + suffixOffset))
+        }
+        return realigned
+    }

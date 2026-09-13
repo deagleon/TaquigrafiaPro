@@ -1,5 +1,6 @@
 package com.example.data
 
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.Flow
 
 class TranscriptionRepository(private val transcriptionDao: TranscriptionDao) {
@@ -26,10 +27,14 @@ class TranscriptionRepository(private val transcriptionDao: TranscriptionDao) {
     }
 
     suspend fun updateTranscriptText(id: Int, text: String) {
-        updateTranscriptTextAndInvalidateTimestamps(id, text)
-    }
-
-    suspend fun updateTranscriptTextAndInvalidateTimestamps(id: Int, text: String) {
-        transcriptionDao.updateTranscriptTextAndInvalidateTimestamps(id, text)
+        val current = transcriptionDao.getTranscriptionById(id).first()
+        val preservedJson = current?.let {
+            SegmentUtils.realignSegments(
+                SegmentUtils.splitParagraphs(it.transcriptText),
+                SegmentUtils.splitParagraphs(text),
+                SegmentUtils.segmentsFromJson(it.segmentsJson)
+            )?.let(SegmentUtils::segmentsToJson)
+        }
+        transcriptionDao.updateTranscriptTextAndSegments(id, text, preservedJson)
     }
 }

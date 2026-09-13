@@ -6,6 +6,7 @@ import com.example.data.api.Segment
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class SegmentUtilsTest {
@@ -153,4 +154,85 @@ class SegmentUtilsTest {
         assertTrue(splitMixed.contains("Foo"))
         assertTrue(splitMixed.contains("Bar"))
     }
+    @Test
+    fun `realignSegments keeps untouched trechos on single-paragraph correction`() {
+        val oldParas = listOf("Abertura da sessão.", "Vereador Cláudio Lima vota sim.", "Encerrada a votação.")
+        val segs = listOf(
+            seg(0, 0.0, 5.0, "Abertura da sessão."),
+            seg(1, 5.0, 12.0, "Vereador Cláudio Lima vota sim."),
+            seg(2, 12.0, 18.0, "Encerrada a votação.")
+        )
+        val newParas = listOf("Abertura da sessão.", "Vereador Cláudio Lima vota não.", "Encerrada a votação.")
+
+        val realigned = SegmentUtils.realignSegments(oldParas, newParas, segs)
+        assertNotNull(realigned)
+        assertEquals(3, realigned!!.size)
+        assertEquals(0.0, realigned[0].start, 0.001)
+        assertEquals(5.0, realigned[0].end, 0.001)
+        assertEquals(12.0, realigned[2].start, 0.001)
+        assertEquals(18.0, realigned[2].end, 0.001)
+        assertEquals("Vereador Cláudio Lima vota não.", realigned[1].text)
+        assertTrue(realigned[1].start >= 5.0)
+        assertTrue(realigned[1].end <= 12.0)
+    }
+
+    @Test
+    fun `realignSegments splits one trecho across its own span`() {
+        val oldParas = listOf("Abertura.", "Vota sim vereador.", "Encerra.")
+        val segs = listOf(
+            seg(0, 0.0, 5.0, "Abertura."),
+            seg(1, 5.0, 12.0, "Vota sim vereador."),
+            seg(2, 12.0, 18.0, "Encerra.")
+        )
+        val newParas = listOf("Abertura.", "Vota sim.", "Vereador presente.", "Encerra.")
+
+        val realigned = SegmentUtils.realignSegments(oldParas, newParas, segs)
+        assertNotNull(realigned)
+        assertEquals(4, realigned!!.size)
+        assertEquals(0.0, realigned[0].start, 0.001)
+        assertEquals(5.0, realigned[0].end, 0.001)
+        assertEquals(12.0, realigned[3].start, 0.001)
+        assertEquals(18.0, realigned[3].end, 0.001)
+        assertEquals(5.0, realigned[1].start, 0.001)
+        assertEquals(8.5, realigned[1].end, 0.001)
+        assertEquals(8.5, realigned[2].start, 0.001)
+        assertEquals(12.0, realigned[2].end, 0.001)
+    }
+
+    @Test
+    fun `realignSegments returns null when segments do not map to paragraphs`() {
+        val oldParas = listOf("A.", "B.", "C.")
+        val segs = listOf(
+            seg(0, 0.0, 5.0, "A."),
+            seg(1, 5.0, 9.0, "B.")
+        )
+        assertNull(SegmentUtils.realignSegments(oldParas, listOf("A.", "B editado.", "C."), segs))
+    }
+
+    @Test
+    fun `realignSegments returns null without segments`() {
+        assertNull(SegmentUtils.realignSegments(listOf("A."), listOf("A editado."), null))
+        assertNull(SegmentUtils.realignSegments(listOf("A."), listOf("A editado."), emptyList()))
+    }
+
+    @Test
+    fun `realignSegments is identity when text is unchanged`() {
+        val paras = listOf("Abertura.", "Votação.", "Encerra.")
+        val segs = listOf(
+            seg(0, 0.0, 5.0, "Abertura."),
+            seg(1, 5.0, 12.0, "Votação."),
+            seg(2, 12.0, 18.0, "Encerra.")
+        )
+        val realigned = SegmentUtils.realignSegments(paras, paras, segs)
+        assertNotNull(realigned)
+        assertEquals(3, realigned!!.size)
+        realigned.forEachIndexed { i, seg ->
+            assertEquals(segs[i].start, seg.start, 0.001)
+            assertEquals(segs[i].end, seg.end, 0.001)
+            assertEquals(segs[i].text, seg.text)
+        }
+    }
+
+    private fun seg(id: Int, start: Double, end: Double, text: String) =
+        Segment(id = id, seek = 0, start = start, end = end, text = text)
 }
