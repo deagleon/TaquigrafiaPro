@@ -850,6 +850,7 @@ fun DetailView(
     var sliderDragging by remember { mutableStateOf(false) }
     var dragValue by remember { mutableStateOf(0f) }
     var playbackSpeed by remember { mutableStateOf(1f) }
+    var pauseAnchorMs by remember { mutableStateOf<Int?>(null) }
 
     fun formatTime(ms: Int): String {
         val totalSeconds = ms / 1000
@@ -1100,8 +1101,17 @@ fun DetailView(
                 } else {
                     try {
                         val playing = try { mp.isPlaying } catch (_: IllegalStateException) { false }
-                        if (playing) { try { mp.pause() } catch (_: Exception) {}; isPlaying = false }
-                        else { try { mp.start(); isPlaying = true } catch (e: Exception) { e.printStackTrace(); Toast.makeText(context, "Falha ao iniciar áudio: ${e.message} (emulador foi iniciado com -no-audio)", Toast.LENGTH_LONG).show() } }
+                        if (playing) { try { mp.pause() } catch (_: Exception) {}; isPlaying = false; pauseAnchorMs = currentPosition }
+                        else {
+                            val anchor = pauseAnchorMs
+                            val target = if (anchor != null && currentPosition == anchor) resumeTargetMs(anchor) else currentPosition
+                            pauseAnchorMs = null
+                            try {
+                                try { mp.seekTo(target) } catch (_: Exception) {}
+                                currentPosition = target
+                                mp.start(); isPlaying = true
+                            } catch (e: Exception) { e.printStackTrace(); Toast.makeText(context, "Falha ao iniciar áudio: ${e.message} (emulador foi iniciado com -no-audio)", Toast.LENGTH_LONG).show() }
+                        }
                     } catch (e: Exception) {
                         e.printStackTrace()
                         Toast.makeText(context, "Erro ao controlar áudio: ${e.message}", Toast.LENGTH_SHORT).show()
@@ -1229,6 +1239,10 @@ fun DetailView(
 }
 private val PLAYBACK_SPEEDS = listOf(0.75f, 0.85f, 1f, 1.15f, 1.25f, 1.5f)
 private const val AUTOSAVE_DEBOUNCE_MS = 2000L
+private const val RETROCESSO_MS = 1500
+
+/** Resume point after a pause: 1.5s of context back, never before zero. */
+internal fun resumeTargetMs(currentMs: Int): Int = (currentMs - RETROCESSO_MS).coerceAtLeast(0)
 
 private fun formatSpeed(speed: Float): String =
     if (speed == speed.toInt().toFloat()) "${speed.toInt()}x" else "${speed}x"
@@ -1299,6 +1313,7 @@ private fun PlayerCard(
                             modifier = Modifier
                                 .size(36.dp)
                                 .background(MaterialTheme.colorScheme.primary, shape = CircleShape)
+                                .testTag("play_pause_button")
                         ) {
                             if (isPlaying) {
                                 Row(

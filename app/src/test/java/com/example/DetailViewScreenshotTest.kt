@@ -179,6 +179,36 @@ class DetailViewScreenshotTest {
     composeTestRule.onNodeWithTag("speed_button").assertExists()
   }
 
+  @Test fun `resume after pause goes 1_5s back`() {
+    showPlayer()
+    composeTestRule.onNodeWithTag("skip_forward_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("play_pause_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("play_pause_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("play_pause_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("00:03 / 05:26").assertExists()
+  }
+
+  @Test fun `moving while paused cancels the retrocesso`() {
+    showPlayer()
+    composeTestRule.onNodeWithTag("skip_forward_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("skip_forward_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("play_pause_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("play_pause_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("skip_back_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("play_pause_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("00:05 / 05:26").assertExists()
+  }
+
   private fun showEditor(onUpdateText: (String) -> Unit = {}) {
     composeTestRule.setContent {
       MyApplicationTheme {
