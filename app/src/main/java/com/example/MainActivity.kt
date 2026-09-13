@@ -849,12 +849,19 @@ fun DetailView(
     var isUserSeeking by remember { mutableStateOf(false) }
     var sliderDragging by remember { mutableStateOf(false) }
     var dragValue by remember { mutableStateOf(0f) }
+    var playbackSpeed by remember { mutableStateOf(1f) }
 
     fun formatTime(ms: Int): String {
         val totalSeconds = ms / 1000
         val minutes = totalSeconds / 60
         val seconds = totalSeconds % 60
         return String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
+    }
+
+    fun applySpeed(mp: android.media.MediaPlayer) {
+        try {
+            mp.playbackParams = mp.playbackParams.setSpeed(playbackSpeed)
+        } catch (_: Exception) { }
     }
 
     LaunchedEffect(audioUri) {
@@ -889,6 +896,7 @@ fun DetailView(
                     }
                 }
                 mediaPlayer = mp
+                applySpeed(mp)
                 try {
                     val mpDur = mp.duration
                     if (mpDur > 500) duration = mpDur
@@ -918,6 +926,10 @@ fun DetailView(
             catch (_: Exception) { break }
             kotlinx.coroutines.delay(50)
         }
+    }
+
+    LaunchedEffect(playbackSpeed, mediaPlayer) {
+        mediaPlayer?.let { applySpeed(it) }
     }
 
     DisposableEffect(Unit) {
@@ -1070,45 +1082,55 @@ fun DetailView(
 
         if (!isExpanded) Spacer(modifier = Modifier.height(8.dp))
 
-        if (!isExpanded || !isImeVisible) {
-            PlayerCard(
-                modifier = Modifier.fillMaxWidth().widthIn(max = 600.dp),
-                isPlaying = isPlaying,
-                currentPosition = currentPosition,
-                duration = duration,
-                audioInitError = audioInitError,
-                sliderDragging = sliderDragging,
-                dragValue = dragValue,
-                formatTime = ::formatTime,
-                onPlayPause = {
-                    val mp = mediaPlayer
-                    if (mp == null) {
-                        Toast.makeText(context, audioInitError ?: "Áudio não carregado (emulador sem áudio: -no-audio). Arquivo salvo em disco.", Toast.LENGTH_LONG).show()
-                    } else {
-                        try {
-                            val playing = try { mp.isPlaying } catch (_: IllegalStateException) { false }
-                            if (playing) { try { mp.pause() } catch (_: Exception) {}; isPlaying = false }
-                            else { try { mp.start(); isPlaying = true } catch (e: Exception) { e.printStackTrace(); Toast.makeText(context, "Falha ao iniciar áudio: ${e.message} (emulador foi iniciado com -no-audio)", Toast.LENGTH_LONG).show() } }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                            Toast.makeText(context, "Erro ao controlar áudio: ${e.message}", Toast.LENGTH_SHORT).show()
-                        }
+        PlayerCard(
+            modifier = Modifier.fillMaxWidth().widthIn(max = 600.dp),
+            compact = isExpanded && isImeVisible,
+            isPlaying = isPlaying,
+            currentPosition = currentPosition,
+            duration = duration,
+            audioInitError = audioInitError,
+            sliderDragging = sliderDragging,
+            dragValue = dragValue,
+            playbackSpeed = playbackSpeed,
+            formatTime = ::formatTime,
+            onPlayPause = {
+                val mp = mediaPlayer
+                if (mp == null) {
+                    Toast.makeText(context, audioInitError ?: "Áudio não carregado (emulador sem áudio: -no-audio). Arquivo salvo em disco.", Toast.LENGTH_LONG).show()
+                } else {
+                    try {
+                        val playing = try { mp.isPlaying } catch (_: IllegalStateException) { false }
+                        if (playing) { try { mp.pause() } catch (_: Exception) {}; isPlaying = false }
+                        else { try { mp.start(); isPlaying = true } catch (e: Exception) { e.printStackTrace(); Toast.makeText(context, "Falha ao iniciar áudio: ${e.message} (emulador foi iniciado com -no-audio)", Toast.LENGTH_LONG).show() } }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        Toast.makeText(context, "Erro ao controlar áudio: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
-                },
-                onSeekPreview = { newValue ->
-                    sliderDragging = true
-                    isUserSeeking = true
-                    dragValue = newValue
-                    currentPosition = newValue.toInt()
-                },
-                onSeekFinished = {
-                    sliderDragging = false
-                    isUserSeeking = false
-                    currentPosition = dragValue.toInt()
-                    try { mediaPlayer?.seekTo(dragValue.toInt()) } catch (e: Exception) { e.printStackTrace() }
                 }
-            )
-        }
+            },
+            onSeekPreview = { newValue ->
+                sliderDragging = true
+                isUserSeeking = true
+                dragValue = newValue
+                currentPosition = newValue.toInt()
+            },
+            onSeekFinished = {
+                sliderDragging = false
+                isUserSeeking = false
+                currentPosition = dragValue.toInt()
+                try { mediaPlayer?.seekTo(dragValue.toInt()) } catch (e: Exception) { e.printStackTrace() }
+            },
+            onSkip = { deltaMs ->
+                val upper = if (duration > 0) duration else 0
+                val target = (currentPosition + deltaMs).coerceIn(0, upper)
+                currentPosition = target
+                try { mediaPlayer?.seekTo(target) } catch (e: Exception) { e.printStackTrace() }
+            },
+            onSpeedChange = {
+                val idx = PLAYBACK_SPEEDS.indexOf(playbackSpeed).takeIf { it >= 0 } ?: 1
+                playbackSpeed = PLAYBACK_SPEEDS[(idx + 1) % PLAYBACK_SPEEDS.size]
+            }
+        )
 
         if (!isExpanded) {
         Spacer(modifier = Modifier.height(8.dp))
@@ -1192,33 +1214,59 @@ fun DetailView(
         Spacer(modifier = Modifier.height(12.dp))
     }
 }
+private val PLAYBACK_SPEEDS = listOf(0.75f, 1f, 1.25f, 1.5f)
+
+private fun formatSpeed(speed: Float): String =
+    if (speed == speed.toInt().toFloat()) "${speed.toInt()}x" else "${speed}x"
+
+@Composable
+private fun PlayerSmallButton(label: String, testTag: String, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        modifier = Modifier.testTag(testTag),
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary
+        )
+    }
+}
+
 @Composable
 private fun PlayerCard(
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
     isPlaying: Boolean,
     currentPosition: Int,
     duration: Int,
     audioInitError: String?,
     sliderDragging: Boolean,
     dragValue: Float,
+    playbackSpeed: Float = 1f,
     formatTime: (Int) -> String,
     onPlayPause: () -> Unit,
     onSeekPreview: (Float) -> Unit,
     onSeekFinished: () -> Unit,
+    onSkip: (Int) -> Unit,
+    onSpeedChange: () -> Unit,
 ) {
         ElevatedCard(
-            modifier = modifier,
+            modifier = modifier.testTag("player_card"),
             colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
             shape = MaterialTheme.shapes.medium,
             elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
-                Text(
-                    text = "Acompanhar Áudio Original",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.height(6.dp))
+                if (!compact) {
+                    Text(
+                        text = "Acompanhar Áudio Original",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                }
                 
                 if (audioInitError != null) {
                     Text(
@@ -1255,21 +1303,27 @@ private fun PlayerCard(
                                 )
                             }
                         }
+                        PlayerSmallButton(label = "-10s", testTag = "skip_back_button", onClick = { onSkip(-10_000) })
+                        PlayerSmallButton(label = "+10s", testTag = "skip_forward_button", onClick = { onSkip(10_000) })
 
                         Spacer(modifier = Modifier.width(12.dp))
 
-                        Slider(
-                            value = if (sliderDragging) dragValue else currentPosition.toFloat(),
-                            onValueChange = onSeekPreview,
-                            onValueChangeFinished = onSeekFinished,
-                            valueRange = 0f..(if (duration > 0) duration.toFloat() else 100f),
-                            modifier = Modifier.weight(1f),
-                            colors = SliderDefaults.colors(
-                                thumbColor = MaterialTheme.colorScheme.primary,
-                                activeTrackColor = MaterialTheme.colorScheme.primary,
-                                inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.24f)
+                        if (!compact) {
+                            Slider(
+                                value = if (sliderDragging) dragValue else currentPosition.toFloat(),
+                                onValueChange = onSeekPreview,
+                                onValueChangeFinished = onSeekFinished,
+                                valueRange = 0f..(if (duration > 0) duration.toFloat() else 100f),
+                                modifier = Modifier.weight(1f),
+                                colors = SliderDefaults.colors(
+                                    thumbColor = MaterialTheme.colorScheme.primary,
+                                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                                    inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.24f)
+                                )
                             )
-                        )
+                        } else {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
 
                         Spacer(modifier = Modifier.width(12.dp))
 
@@ -1278,6 +1332,7 @@ private fun PlayerCard(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        PlayerSmallButton(label = formatSpeed(playbackSpeed), testTag = "speed_button", onClick = onSpeedChange)
                     }
                 }
             }

@@ -1,10 +1,16 @@
 package com.example
 
+import java.io.File
+
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performScrollToIndex
+import org.robolectric.shadows.ShadowMediaPlayer
+import org.robolectric.shadows.util.DataSource
 import com.example.data.SegmentUtils
 import com.example.data.TranscriptionEntity
 import com.example.ui.theme.MyApplicationTheme
@@ -83,5 +89,56 @@ class DetailViewScreenshotTest {
     composeTestRule.onNodeWithTag("transcript_body_text").performScrollToIndex(19)
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithTag("paragraph_19").assertExists()
+  }
+  private fun entityWithAudio(): TranscriptionEntity {
+    val tmp = File.createTempFile("fake-audio", ".mp3").apply { deleteOnExit() }
+    ShadowMediaPlayer.addMediaInfo(
+      DataSource.toDataSource(tmp.absolutePath),
+      ShadowMediaPlayer.MediaInfo(326_000, 0)
+    )
+    return TranscriptionEntity(
+      title = "Test audio",
+      fileName = "test.mp3",
+      fileSize = 1234L,
+      mimeType = "audio/mpeg",
+      transcriptText = "Parágrafo um.\n\nParágrafo dois.",
+      modelUsed = "test-model",
+      audioDurationMs = 326_000,
+      audioUri = "file://${tmp.absolutePath}",
+      segmentsJson = null
+    )
+  }
+  private fun showPlayer() {
+    composeTestRule.setContent {
+      MyApplicationTheme {
+        DetailView(entity = entityWithAudio(), onDelete = {}, onRename = {}, onUpdateText = {})
+      }
+    }
+    composeTestRule.waitForIdle()
+  }
+  @Test fun `PlayerCard keeps test tag in read mode`() {
+    showPlayer()
+    composeTestRule.onNodeWithTag("player_card").assertExists()
+  }
+
+  @Test fun `PlayerCard stays composed after entering edit mode`() {
+    showPlayer()
+    composeTestRule.onNodeWithTag("expand_text_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("player_card").assertExists()
+  }
+
+  @Test fun `Skip forward moves position by 10 seconds`() {
+    showPlayer()
+    composeTestRule.onNodeWithTag("skip_forward_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("00:10 / 05:26").assertExists()
+  }
+
+  @Test fun `Speed button cycles from 1x to 1_25x`() {
+    showPlayer()
+    composeTestRule.onNodeWithTag("speed_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("1.25x", substring = true).assertExists()
   }
 }
