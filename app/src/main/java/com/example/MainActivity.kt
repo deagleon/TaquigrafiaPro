@@ -1127,7 +1127,7 @@ fun DetailView(
                 try { mediaPlayer?.seekTo(target) } catch (e: Exception) { e.printStackTrace() }
             },
             onSpeedChange = {
-                val idx = PLAYBACK_SPEEDS.indexOf(playbackSpeed).takeIf { it >= 0 } ?: 1
+                val idx = PLAYBACK_SPEEDS.indexOf(playbackSpeed).takeIf { it >= 0 } ?: 2
                 playbackSpeed = PLAYBACK_SPEEDS[(idx + 1) % PLAYBACK_SPEEDS.size]
             }
         )
@@ -1227,14 +1227,14 @@ fun DetailView(
         Spacer(modifier = Modifier.height(12.dp))
     }
 }
-private val PLAYBACK_SPEEDS = listOf(0.75f, 1f, 1.25f, 1.5f)
+private val PLAYBACK_SPEEDS = listOf(0.75f, 0.85f, 1f, 1.15f, 1.25f, 1.5f)
 private const val AUTOSAVE_DEBOUNCE_MS = 2000L
 
 private fun formatSpeed(speed: Float): String =
     if (speed == speed.toInt().toFloat()) "${speed.toInt()}x" else "${speed}x"
 
 @Composable
-private fun PlayerSmallButton(label: String, testTag: String, onClick: () -> Unit) {
+private fun PlayerSmallButton(label: String, testTag: String, highlight: Boolean = true, onClick: () -> Unit) {
     TextButton(
         onClick = onClick,
         modifier = Modifier.testTag(testTag),
@@ -1243,7 +1243,7 @@ private fun PlayerSmallButton(label: String, testTag: String, onClick: () -> Uni
         Text(
             text = label,
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary
+            color = if (highlight) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }
@@ -1275,9 +1275,9 @@ private fun PlayerCard(
             Column(modifier = Modifier.padding(12.dp)) {
                 if (!compact) {
                     Text(
-                        text = "Acompanhar Áudio Original",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary
+                        text = "Áudio original · ${formatTime(duration)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                 }
@@ -1317,8 +1317,8 @@ private fun PlayerCard(
                                 )
                             }
                         }
-                        PlayerSmallButton(label = "-10s", testTag = "skip_back_button", onClick = { onSkip(-10_000) })
-                        PlayerSmallButton(label = "+10s", testTag = "skip_forward_button", onClick = { onSkip(10_000) })
+                        PlayerSmallButton(label = "-5s", testTag = "skip_back_button", highlight = false, onClick = { onSkip(-5_000) })
+                        PlayerSmallButton(label = "+5s", testTag = "skip_forward_button", highlight = false, onClick = { onSkip(5_000) })
 
                         Spacer(modifier = Modifier.width(12.dp))
 
@@ -1344,9 +1344,9 @@ private fun PlayerCard(
                         Text(
                             text = "${formatTime(currentPosition)} / ${formatTime(duration)}",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurface
                         )
-                        PlayerSmallButton(label = formatSpeed(playbackSpeed), testTag = "speed_button", onClick = onSpeedChange)
+                        PlayerSmallButton(label = formatSpeed(playbackSpeed), testTag = "speed_button", highlight = playbackSpeed != 1f, onClick = onSpeedChange)
                     }
                 }
             }

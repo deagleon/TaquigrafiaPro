@@ -133,19 +133,52 @@ class DetailViewScreenshotTest {
     composeTestRule.onNodeWithTag("player_card").assertExists()
   }
 
-  @Test fun `Skip forward moves position by 10 seconds`() {
+  @Test fun `Skip forward moves position by 5 seconds`() {
     showPlayer()
     composeTestRule.onNodeWithTag("skip_forward_button").performClick()
     composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithText("00:10 / 05:26").assertExists()
+    composeTestRule.onNodeWithText("00:05 / 05:26").assertExists()
   }
 
-  @Test fun `Speed button cycles from 1x to 1_25x`() {
+  @Test fun `Speed button walks all six speeds and back to 1x`() {
     showPlayer()
-    composeTestRule.onNodeWithTag("speed_button").performClick()
+    val speed = composeTestRule.onNodeWithTag("speed_button")
+    speed.performClick()
     composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithText("1.25x", substring = true).assertExists()
+    composeTestRule.onNodeWithText("1.15x").assertExists()
+    speed.performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("1.25x").assertExists()
+    speed.performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("1.5x").assertExists()
+    speed.performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("0.75x").assertExists()
+    speed.performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("0.85x").assertExists()
+    speed.performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("1x").assertExists()
   }
+  @Test fun `Skip back from 5s returns to zero`() {
+    showPlayer()
+    composeTestRule.onNodeWithTag("skip_forward_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("skip_back_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("00:00 / 05:26").assertExists()
+  }
+
+  @Test fun `Compact edit mode keeps skip and speed in reach`() {
+    showEditor()
+    composeTestRule.onNodeWithTag("player_card").assertExists()
+    composeTestRule.onNodeWithTag("skip_back_button").assertExists()
+    composeTestRule.onNodeWithTag("skip_forward_button").assertExists()
+    composeTestRule.onNodeWithTag("speed_button").assertExists()
+  }
+
   private fun showEditor(onUpdateText: (String) -> Unit = {}) {
     composeTestRule.setContent {
       MyApplicationTheme {
