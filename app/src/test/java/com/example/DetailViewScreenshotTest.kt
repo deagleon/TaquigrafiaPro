@@ -15,6 +15,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.performTextInput
 import org.junit.Assert.assertTrue
 import org.robolectric.shadows.ShadowMediaPlayer
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipe
 import org.robolectric.shadows.util.DataSource
 import com.example.data.SegmentUtils
 import com.example.data.TranscriptionEntity
@@ -230,6 +233,65 @@ class DetailViewScreenshotTest {
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithTag("paragraph_0").assertExists()
     composeTestRule.onNodeWithText("alpha beta gama").assertExists()
+  }
+
+  private fun entityWithPeaks(): TranscriptionEntity {
+    val tmp = File.createTempFile("fake-audio", ".mp3").apply { deleteOnExit() }
+    ShadowMediaPlayer.addMediaInfo(
+      DataSource.toDataSource(tmp.absolutePath),
+      ShadowMediaPlayer.MediaInfo(326_000, 0)
+    )
+    return TranscriptionEntity(
+      title = "Test peaks",
+      fileName = "test.mp3",
+      fileSize = 1234L,
+      mimeType = "audio/mpeg",
+      transcriptText = "Parágrafo um.",
+      modelUsed = "test-model",
+      audioDurationMs = 326_000,
+      audioUri = "file://${tmp.absolutePath}",
+      segmentsJson = null,
+      peaksJson = "[0.1,0.3,0.2,0.8,0.9,0.4,0.1,0.0,0.2,0.6,0.7,0.3]"
+    )
+  }
+  private fun showWaveform() {
+    composeTestRule.setContent {
+      MyApplicationTheme {
+        DetailView(entity = entityWithPeaks(), onDelete = {}, onRename = {}, onUpdateText = {})
+      }
+    }
+    composeTestRule.waitForIdle()
+  }
+
+  @Test fun `waveform renders when peaks exist`() {
+    showWaveform()
+    composeTestRule.onNodeWithTag("waveform_bar").assertExists()
+  }
+
+  @Test fun `no waveform without peaks`() {
+    showPlayer()
+    composeTestRule.onNodeWithTag("waveform_bar").assertDoesNotExist()
+  }
+
+  @Test fun `tap center seeks to the middle`() {
+    showWaveform()
+    composeTestRule.onNodeWithTag("waveform_bar").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("02:43 / 05:26").assertExists()
+  }
+
+  @Test fun `drag across scrubs to the drop point`() {
+    showWaveform()
+    val node = composeTestRule.onNodeWithTag("waveform_bar")
+    val size = node.fetchSemanticsNode().size
+    node.performTouchInput {
+      swipe(
+        Offset(size.width * 0.1f, size.height / 2f),
+        Offset(size.width * 0.9f, size.height / 2f)
+      )
+    }
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("04:53 / 05:26").assertExists()
   }
 
   private fun showEditor(onUpdateText: (String) -> Unit = {}) {

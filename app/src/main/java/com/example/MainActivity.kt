@@ -114,6 +114,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -135,6 +138,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.data.SegmentUtils
 import com.example.data.TimedParagraph
 import com.example.data.TranscriptionEntity
+import com.example.data.WaveformUtils
 import com.example.data.provider.ModelCatalog
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.TranscriptionState
@@ -948,6 +952,7 @@ fun DetailView(
             } catch (_: Exception) { null }
         }
     }
+    val peaks = remember(entity.peaksJson) { WaveformUtils.peaksFromJson(entity.peaksJson) }
     val rawParagraphs = remember(entity.transcriptText) { SegmentUtils.splitParagraphs(entity.transcriptText) }
     val editableParas = remember { androidx.compose.runtime.mutableStateListOf<String>() }
     var hasUnsavedChanges by remember { mutableStateOf(false) }
@@ -1099,6 +1104,7 @@ fun DetailView(
             sliderDragging = sliderDragging,
             dragValue = dragValue,
             playbackSpeed = playbackSpeed,
+            peaks = peaks,
             formatTime = ::formatTime,
             onPlayPause = {
                 val mp = mediaPlayer
@@ -1270,6 +1276,63 @@ private fun PlayerSmallButton(label: String, testTag: String, highlight: Boolean
 }
 
 @Composable
+private fun WaveformBar(
+    modifier: Modifier = Modifier,
+    peaks: List<Float>,
+    positionMs: Int,
+    durationMs: Int,
+    barHeight: androidx.compose.ui.unit.Dp,
+    onSeekPreview: (Float) -> Unit,
+    onSeekFinished: () -> Unit,
+) {
+    val playedColor = MaterialTheme.colorScheme.primary
+    val unplayedColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+    val playheadColor = MaterialTheme.colorScheme.primary
+    fun xToMs(x: Float, width: Float): Int =
+        ((x / width.coerceAtLeast(1f)) * durationMs).toInt().coerceIn(0, durationMs.coerceAtLeast(0))
+    Canvas(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(barHeight)
+            .testTag("waveform_bar")
+            .pointerInput(durationMs, peaks) {
+                detectTapGestures { offset ->
+                    val ms = xToMs(offset.x, size.width.toFloat()).toFloat()
+                    onSeekPreview(ms)
+                    onSeekFinished()
+                }
+            }
+            .pointerInput(durationMs, peaks) {
+                detectHorizontalDragGestures(
+                    onDragEnd = { onSeekFinished() },
+                    onHorizontalDrag = { change, _ ->
+                        change.consume()
+                        onSeekPreview(xToMs(change.position.x, size.width.toFloat()).toFloat())
+                    }
+                )
+            }
+    ) {
+        val n = peaks.size
+        val fraction = if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
+        val columns = size.width.toInt().coerceAtLeast(1)
+        val barW = size.width / columns
+        for (px in 0 until columns) {
+            val peak = peaks[((px.toFloat() / columns) * n).toInt().coerceIn(0, n - 1)]
+            val h = (peak * size.height).coerceAtLeast(2f)
+            val cx = px * barW + barW / 2
+            drawLine(
+                color = if ((px.toFloat() / columns) <= fraction) playedColor else unplayedColor,
+                start = Offset(cx, (size.height - h) / 2),
+                end = Offset(cx, (size.height + h) / 2),
+                strokeWidth = (barW * 0.7f).coerceAtLeast(1f)
+            )
+        }
+        val headX = fraction * size.width
+        drawLine(playheadColor, Offset(headX, 0f), Offset(headX, size.height), strokeWidth = 2.dp.toPx())
+    }
+}
+
+@Composable
 private fun PlayerCard(
     modifier: Modifier = Modifier,
     compact: Boolean = false,
@@ -1286,6 +1349,7 @@ private fun PlayerCard(
     onSeekFinished: () -> Unit,
     onSkip: (Int) -> Unit,
     onSpeedChange: () -> Unit,
+    peaks: List<Float>? = null,
 ) {
         ElevatedCard(
             modifier = modifier.testTag("player_card"),
@@ -1343,20 +1407,23 @@ private fun PlayerCard(
                         PlayerSmallButton(label = "+5s", testTag = "skip_forward_button", highlight = false, onClick = { onSkip(5_000) })
 
                         Spacer(modifier = Modifier.width(12.dp))
-
-                        if (!compact) {
-                            Slider(
-                                value = if (sliderDragging) dragValue else currentPosition.toFloat(),
-                                onValueChange = onSeekPreview,
-                                onValueChangeFinished = onSeekFinished,
-                                valueRange = 0f..(if (duration > 0) duration.toFloat() else 100f),
-                                modifier = Modifier.weight(1f),
-                                colors = SliderDefaults.colors(
-                                    thumbColor = MaterialTheme.colorScheme.primary,
-                                    activeTrackColor = MaterialTheme.colorScheme.primary,
-                                    inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.24f)
+                        if (peaks == null) {
+                            if (!compact) {
+                                Slider(
+                                    value = if (sliderDragging) dragValue else currentPosition.toFloat(),
+                                    onValueChange = onSeekPreview,
+                                    onValueChangeFinished = onSeekFinished,
+                                    valueRange = 0f..(if (duration > 0) duration.toFloat() else 100f),
+                                    modifier = Modifier.weight(1f),
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = MaterialTheme.colorScheme.primary,
+                                        activeTrackColor = MaterialTheme.colorScheme.primary,
+                                        inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.24f)
+                                    )
                                 )
-                            )
+                            } else {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
                         } else {
                             Spacer(modifier = Modifier.weight(1f))
                         }
@@ -1369,6 +1436,18 @@ private fun PlayerCard(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         PlayerSmallButton(label = formatSpeed(playbackSpeed), testTag = "speed_button", highlight = playbackSpeed != 1f, onClick = onSpeedChange)
+                    }
+                    if (peaks != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        WaveformBar(
+                            peaks = peaks,
+                            positionMs = if (sliderDragging) dragValue.toInt() else currentPosition,
+                            durationMs = duration,
+                            barHeight = if (compact) 24.dp else 44.dp,
+                            onSeekPreview = onSeekPreview,
+                            onSeekFinished = onSeekFinished,
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
                 }
             }
