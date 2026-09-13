@@ -326,6 +326,16 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                     saveUriToInternalStorage(uri, fileInfo.name)
                 } ?: uri
 
+                // Forma de onda: decode on-device uma vez; falha aqui só zera os picos.
+                val peaksJson = withContext(Dispatchers.IO) {
+                    try {
+                        val pcm = com.example.data.WaveformUtils.decodeToMonoPcm(context, savedAudioUri, resolvedDurationMs)
+                            ?: return@withContext null
+                        val peaks = com.example.data.WaveformUtils.computePeaks(pcm, com.example.data.WaveformUtils.WAVEFORM_BUCKETS)
+                        com.example.data.WaveformUtils.peaksToJson(peaks)
+                    } catch (_: Exception) { null }
+                }
+
                 val newEntity = TranscriptionEntity(
                     title = fileInfo.name.substringBeforeLast("."),
                     fileName = fileInfo.name,
@@ -335,7 +345,8 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                     modelUsed = _selectedModel.value,
                     audioUri = savedAudioUri.toString(),
                     segmentsJson = segmentsJson,
-                    audioDurationMs = resolvedDurationMs
+                    audioDurationMs = resolvedDurationMs,
+                    peaksJson = peaksJson
                 )
 
                 val id = withContext(Dispatchers.IO) {

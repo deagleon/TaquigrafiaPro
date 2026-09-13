@@ -15,5 +15,6 @@ data class TranscriptionEntity(
     val modelUsed: String,
     val audioUri: String? = null,
     val segmentsJson: String? = null,
-    val audioDurationMs: Int? = null
+    val audioDurationMs: Int? = null,
+    val peaksJson: String? = null
 )
