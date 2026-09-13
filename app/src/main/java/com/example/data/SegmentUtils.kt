@@ -2,6 +2,9 @@ package com.example.data
 
 import com.example.data.api.Segment
 import java.util.Locale
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.Types
+import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 
 data class TimedParagraph(
     val text: String,
@@ -385,8 +388,7 @@ object SegmentUtils {
             }
         }
 
-        // If clean segments exist but paragraph count differs (e.g. grouped text),
-        // anchor trechos to real segment spans by text and interpolate the rest.
+        // If clean segments exist but paragraph count differs (e.g. grouped text)
         if (!cleanSegs.isNullOrEmpty()) {
             val totalSegDuration = (cleanSegs.last().end * 1000).toInt().coerceAtLeast(1000)
             val effectiveDuration = audioDurationMs?.coerceAtLeast(1000) ?: totalSegDuration
@@ -429,10 +431,6 @@ object SegmentUtils {
             .replace(Regex("[^\\p{L}\\p{Nd}]+"), " ")
             .trim()
     }
-}
-import com.squareup.moshi.Moshi
-import com.squareup.moshi.Types
-import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
     private val segmentsAdapter: com.squareup.moshi.JsonAdapter<List<Segment>> by lazy {
         Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
             .adapter(Types.newParameterizedType(List::class.java, Segment::class.java))
