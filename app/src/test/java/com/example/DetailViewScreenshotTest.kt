@@ -14,6 +14,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.performTextInput
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.robolectric.shadows.ShadowMediaPlayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.performTouchInput
@@ -39,6 +40,8 @@ import com.github.takahirom.roborazzi.RobolectricDeviceQualifiers
 class DetailViewScreenshotTest {
 
   @get:Rule val composeTestRule = createComposeRule()
+
+  private var createdPlayer: android.media.MediaPlayer? = null
 
   @Test fun `DetailView shows all paras for long transcript`() {
     val longText = (1..40).joinToString("\n\n") { "Parágrafo $it" }
@@ -142,7 +145,7 @@ class DetailViewScreenshotTest {
     showPlayer()
     composeTestRule.onNodeWithTag("skip_forward_button").performClick()
     composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithText("00:05 / 05:26").assertExists()
+    composeTestRule.onNodeWithText("00:05").assertExists()
   }
 
   @Test fun `Speed button walks all six speeds and back to 1x`() {
@@ -173,7 +176,7 @@ class DetailViewScreenshotTest {
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithTag("skip_back_button").performClick()
     composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithText("00:00 / 05:26").assertExists()
+    composeTestRule.onNodeWithText("00:00").assertExists()
   }
 
   @Test fun `Compact edit mode keeps skip and speed in reach`() {
@@ -194,7 +197,7 @@ class DetailViewScreenshotTest {
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithTag("play_pause_button").performClick()
     composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithText("00:03 / 05:26").assertExists()
+    composeTestRule.onNodeWithText("00:03").assertExists()
   }
 
   @Test fun `moving while paused cancels the retrocesso`() {
@@ -211,7 +214,7 @@ class DetailViewScreenshotTest {
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithTag("play_pause_button").performClick()
     composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithText("00:05 / 05:26").assertExists()
+    composeTestRule.onNodeWithText("00:05").assertExists()
   }
 
   @Test fun `paragraph with word timings renders full text`() {
@@ -279,7 +282,7 @@ class DetailViewScreenshotTest {
     showWaveform()
     composeTestRule.onNodeWithTag("waveform_bar").performClick()
     composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithText("02:43 / 05:26").assertExists()
+    composeTestRule.onNodeWithText("02:43").assertExists()
   }
 
   @Test fun `drag across scrubs to the drop point`() {
@@ -293,57 +296,52 @@ class DetailViewScreenshotTest {
       )
     }
     composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithText("04:53 / 05:26").assertExists()
+    composeTestRule.onNodeWithText("04:53").assertExists()
   }
-  @Test fun `arming shows selection hint`() {
+  @Test fun `waveform drag releases seeking so player never freezes`() {
+    // Regressão: o arraste marcava seeking e nunca fechava — o tempo congelava com o áudio rolando.
     showWaveform()
-    composeTestRule.onNodeWithTag("loop_button").performClick()
-    composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithContentDescription("selecione o laço", substring = true).assertExists()
-  }
-
-  @Test fun `armed drag marks the loop interval`() {
-    showWaveform()
-    composeTestRule.onNodeWithTag("loop_button").performClick()
-    composeTestRule.waitForIdle()
     val node = composeTestRule.onNodeWithTag("waveform_bar")
     val size = node.fetchSemanticsNode().size
     node.performTouchInput {
       swipe(
-        Offset(size.width * 0.2f, size.height / 2f),
-        Offset(size.width * 0.4f, size.height / 2f)
+        Offset(size.width * 0.1f, size.height / 2f),
+        Offset(size.width * 0.9f, size.height / 2f)
       )
     }
     composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithContentDescription("laço de", substring = true).assertExists()
+    composeTestRule.onNodeWithText("04:53").assertExists()
+    composeTestRule.onNodeWithTag("skip_back_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("04:48").assertExists()
   }
 
-  @Test fun `tap while armed seeks without looping`() {
+  @Test fun `loop button stays hidden while logic is preserved`() {
+    // Laco oculto temporariamente na UI; logica segue coberta em PlayerLogicTest.
     showWaveform()
-    composeTestRule.onNodeWithTag("loop_button").performClick()
-    composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithTag("waveform_bar").performClick()
-    composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithText("02:43 / 05:26").assertExists()
-    composeTestRule.onNodeWithContentDescription("laço de", substring = true).assertDoesNotExist()
+    composeTestRule.onNodeWithTag("loop_button").assertDoesNotExist()
+    composeTestRule.onNodeWithTag("waveform_bar").assertExists()
   }
 
-  @Test fun `loop button clears the active loop`() {
-    showWaveform()
-    composeTestRule.onNodeWithTag("loop_button").performClick()
-    composeTestRule.waitForIdle()
-    val node = composeTestRule.onNodeWithTag("waveform_bar")
-    val size = node.fetchSemanticsNode().size
-    node.performTouchInput {
-      swipe(
-        Offset(size.width * 0.2f, size.height / 2f),
-        Offset(size.width * 0.4f, size.height / 2f)
-      )
-    }
-    composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithTag("loop_button").performClick()
-    composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithContentDescription("laço de", substring = true).assertDoesNotExist()
+  @Test fun `player title shows once without duplicated duration`() {
+    showPlayer()
+    composeTestRule.onNodeWithTag("player_title").assertExists()
+    composeTestRule.onNodeWithText("Áudio original").assertExists()
+    composeTestRule.onNodeWithText("Áudio original ·", substring = true).assertDoesNotExist()
+  }
+
+  @Test fun `timeline second line splits current and total`() {
+    showPlayer()
+    composeTestRule.onNodeWithTag("time_current").assertExists()
+    composeTestRule.onNodeWithTag("time_total").assertExists()
+    composeTestRule.onNodeWithText("05:26").assertExists()
+  }
+
+  @Test fun `transcript header never clips first paragraph`() {
+    showPlayer()
+    composeTestRule.onNodeWithTag("transcript_header").assertExists()
+    composeTestRule.onNodeWithTag("paragraph_0").assertExists()
+    composeTestRule.onNodeWithTag("paragraph_0").assertIsDisplayed()
   }
 
 
@@ -360,7 +358,7 @@ class DetailViewScreenshotTest {
     val size = waveSize()
     waveNode().performTouchInput { doubleClick(Offset(size.width * 0.1f, size.height / 2f)) }
     composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithText("00:05 / 05:26").assertExists()
+    composeTestRule.onNodeWithText("00:05").assertExists()
   }
 
   @Test fun `double-tap right advances 5s from current`() {
@@ -372,7 +370,7 @@ class DetailViewScreenshotTest {
     val size = waveSize()
     waveNode().performTouchInput { doubleClick(Offset(size.width * 0.9f, size.height / 2f)) }
     composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithText("00:15 / 05:26").assertExists()
+    composeTestRule.onNodeWithText("00:15").assertExists()
   }
 
   @Test fun `double-tap center toggles play`() {
@@ -390,8 +388,51 @@ class DetailViewScreenshotTest {
     }
     composeTestRule.onNodeWithTag("paragraph_0").performTouchInput { doubleClick() }
     composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithText("00:00 / 05:26").assertExists()
-    composeTestRule.onNodeWithContentDescription("Tocar").assertDoesNotExist()
+    composeTestRule.onNodeWithText("00:00").assertExists()
+    composeTestRule.onNodeWithContentDescription("Tocar").assertExists()
+  }
+
+  @Test fun `tapping a paragraph seeks without autoplaying`() {
+    showWaveform()
+    composeTestRule.onNodeWithTag("paragraph_0").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("00:00").assertExists()
+    composeTestRule.onNodeWithContentDescription("Tocar").assertExists()
+  }
+
+  @Test fun `opening the transcription never starts audio by itself`() {
+    // Regressão: a tela abre pausada em 00:00 e nada deve começar a tocar sem
+    // o toque no Play, nem por efeito do player sendo preparado.
+    ShadowMediaPlayer.setCreateListener { mp, _ -> createdPlayer = mp }
+    showWaveform()
+    composeTestRule.waitUntil(timeoutMillis = 5_000) { createdPlayer != null }
+    createdPlayer!!.start()
+    composeTestRule.mainClock.advanceTimeBy(1_500)
+    composeTestRule.waitForIdle()
+    assertFalse(
+      "abrir a transcrição não pode iniciar o áudio sozinho",
+      createdPlayer!!.isPlaying
+    )
+    composeTestRule.onNodeWithContentDescription("Tocar").assertExists()
+  }
+
+  @Test fun `audio resumed by the device while paused is silenced`() {
+    // Regressão: alguns aparelhos retomam a reprodução sozinhos depois de um
+    // seekTo em estado Prepared. O som tocava sem ninguém pedir e a UI, que
+    // continuava "pausada", congelava com o áudio rolando.
+    ShadowMediaPlayer.setCreateListener { mp, _ -> createdPlayer = mp }
+    showWaveform()
+    composeTestRule.waitUntil(timeoutMillis = 5_000) { createdPlayer != null }
+    composeTestRule.onNodeWithTag("paragraph_0").performClick()
+    composeTestRule.mainClock.advanceTimeBy(150)
+    createdPlayer!!.start()
+    composeTestRule.mainClock.advanceTimeBy(1_000)
+    composeTestRule.waitForIdle()
+    assertFalse(
+      "app deve silenciar áudio iniciado sem pedido do usuário",
+      createdPlayer!!.isPlaying
+    )
+    composeTestRule.onNodeWithContentDescription("Tocar").assertExists()
   }
 
   @Test fun `hold advances continuously until release`() {
@@ -405,7 +446,7 @@ class DetailViewScreenshotTest {
       )
     }
     composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithText("00:00 / 05:26").assertDoesNotExist()
+    composeTestRule.onNodeWithText("00:00").assertDoesNotExist()
     composeTestRule.onNodeWithText("00:0", substring = true).assertExists()
   }
 

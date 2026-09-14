@@ -34,8 +34,10 @@ sealed interface TranscriptionState {
     object Loading : TranscriptionState
     object Transcribing : TranscriptionState
     data class Success(val text: String, val entityId: Int) : TranscriptionState
-    data class Error(val message: String) : TranscriptionState
+    data class Error(val message: String, val action: ErrorAction? = null) : TranscriptionState
 }
+
+enum class ErrorAction { RETRY_WITH_WHISPER }
 
 class TranscriptionViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -102,6 +104,26 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
 
     fun hasEffectiveKey(providerId: String): Boolean = apiKeyResolver.hasEffectiveKey(providerId)
 
+    private fun transcriptionError(e: Throwable, fallback: String): TranscriptionState.Error {
+        val action = if (e is com.example.data.provider.ContainerRefusedException) {
+            ErrorAction.RETRY_WITH_WHISPER
+        } else null
+        return TranscriptionState.Error(e.message ?: fallback, action)
+    }
+
+    /** Troca para o Whisper (aceita M4A, devolve Segmentos) e reenvia o original. */
+    fun retryWithWhisper() {
+        val whisper = "openai/whisper-large-v3-turbo"
+        _selectedModel.value = whisper
+        if (_selectedProvider.value != "openrouter") _selectedProvider.value = "openrouter"
+        sharedPrefs.edit().apply {
+            putString("selected_provider", "openrouter")
+            putString("selected_model", whisper)
+            apply()
+        }
+        startTranscription()
+    }
+
     fun selectFile(uri: Uri) {
         val context = getApplication<Application>()
         var name = "audio_desconhecido"
@@ -130,7 +152,7 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
             else -> "audio/mpeg"
         }
 
-        _selectedFile.value = FileInfo(name, size, mimeType)
+        _selectedFile.value = FileInfo(com.example.data.WavTranscoder.sanitizeFileName(name), size, mimeType)
         _selectedUri.value = uri
         _transcriptionState.value = TranscriptionState.Idle
     }
@@ -190,8 +212,32 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         viewModelScope.launch {
             try {
                 val context = getApplication<Application>()
-                val retrieverDurationMs = withContext(Dispatchers.IO) { extractAudioDurationMs(uri) }
-                val needsChunking = com.example.data.AudioChunker.isChunkingNeeded(retrieverDurationMs, fileInfo.size)
+                // ADR-0004: modelo exigente + nao-WAV converte uma vez; o estado segue intacto para retry.
+                var workUri = uri
+                var workInfo = fileInfo
+                if (com.example.data.provider.ModelCatalog.needsWavConversion(_selectedModel.value, fileInfo.name)) {
+                    val converted = withContext(Dispatchers.IO) {
+                        com.example.data.WavTranscoder.transcodeToWav16kMono(context, uri)
+                    }
+                    if (converted == null) {
+                        _transcriptionState.value = TranscriptionState.Error(
+                            "Não foi possível converter o áudio para WAV, exigido pelo modelo " +
+                                "${com.example.data.provider.ModelCatalog.findLabel(_selectedModel.value)}. " +
+                                "Toque em Tentar com Whisper.",
+                            ErrorAction.RETRY_WITH_WHISPER
+                        )
+                        return@launch
+                    }
+                    val wavName = fileInfo.name.substringBeforeLast(".").ifBlank { "audio" } + ".wav"
+                    workUri = Uri.fromFile(converted)
+                    workInfo = FileInfo(wavName, converted.length(), "audio/wav")
+                }
+                val retrieverDurationMs = withContext(Dispatchers.IO) { extractAudioDurationMs(workUri) }
+                // Fix 5:26 hallucination: sessões plenárias de 2-8min têm silêncios entre votos e ruído de microfone
+                // que causa loop autorregressivo se processado em chunk único de 5min. Força VAD 2min para isolar ruído.
+                val vadSilenceRatioForChunk = if (retrieverDurationMs != null && retrieverDurationMs in 120_000..480_000) 0.4 else null
+                val vadHasGapForChunk = vadSilenceRatioForChunk != null
+                val needsChunking = com.example.data.AudioChunker.isChunkingNeeded(retrieverDurationMs, workInfo.size, vadSilenceRatioForChunk, vadHasGapForChunk)
                 val provider = providerRegistry.get(_selectedProvider.value)
                 if (provider == null) {
                     _transcriptionState.value = TranscriptionState.Error("Provedor desconhecido: ${_selectedProvider.value}")
@@ -217,19 +263,19 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                 val transcriptionResult: com.example.data.provider.TranscriptionResult
                 var mergedDurationMs: Int? = null
                 if (needsChunking) {
-                    android.util.Log.d("TranscriptionVM", "long audio detected dur=${retrieverDurationMs} size=${fileInfo.size} -> chunking")
+                    android.util.Log.d("TranscriptionVM", "long audio detected dur=${retrieverDurationMs} size=${workInfo.size} -> chunking vadRatio=$vadSilenceRatioForChunk")
                     val chunks = withContext(Dispatchers.IO) {
-                        com.example.data.AudioChunker.splitIfNeeded(context, uri, fileInfo.name, retrieverDurationMs, fileInfo.size)
+                        com.example.data.AudioChunker.splitIfNeeded(context, workUri, workInfo.name, retrieverDurationMs, workInfo.size, vadSilenceRatioForChunk, vadHasGapForChunk, null)
                     }
                     android.util.Log.d("DiagTrunc", "chunks=${chunks.size} starts=${chunks.map{it.startMs}}")
                     if (chunks.isEmpty()) {
                         // Fallback single
-                        val base64Data = withContext(Dispatchers.IO) { readUriAsBase64(uri) }
+                        val base64Data = withContext(Dispatchers.IO) { readUriAsBase64(workUri) }
                             ?: run { _transcriptionState.value = TranscriptionState.Error("Não foi possível ler o arquivo de áudio selecionado."); return@launch }
-                        android.util.Log.d("DiagTrunc", "file=${fileInfo.name} mime=${fileInfo.mimeType} size=${fileInfo.size} durMs=${retrieverDurationMs} needsChunk=${needsChunking} base64Len=${base64Data.length} provider=${_selectedProvider.value} model=${_selectedModel.value}")
-                        val res = transcribeSingle(base64Data, fileInfo)
+                        android.util.Log.d("DiagTrunc", "file=${workInfo.name} mime=${workInfo.mimeType} size=${workInfo.size} durMs=${retrieverDurationMs} needsChunk=${needsChunking} base64Len=${base64Data.length} provider=${_selectedProvider.value} model=${_selectedModel.value}")
+                        val res = transcribeSingle(base64Data, workInfo)
                         transcriptionResult = res.getOrElse { e ->
-                            _transcriptionState.value = TranscriptionState.Error(e.message ?: "Erro desconhecido na transcrição.")
+                            _transcriptionState.value = transcriptionError(e, "Erro desconhecido na transcrição.")
                             return@launch
                         }
                         mergedDurationMs = transcriptionResult.durationMs ?: retrieverDurationMs
@@ -242,8 +288,8 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                             val chunkUri = Uri.fromFile(chunk.file)
                             val chunkBase64 = withContext(Dispatchers.IO) { readUriAsBase64(chunkUri) }
                             if (chunkBase64 == null) { failed = IllegalStateException("Falha ao ler chunk ${idx + 1}/${chunks.size}"); break }
-                            android.util.Log.d("DiagTrunc", "file=${fileInfo.name} mime=${fileInfo.mimeType} size=${fileInfo.size} durMs=${retrieverDurationMs} needsChunk=${needsChunking} base64Len=${chunkBase64.length} provider=${_selectedProvider.value} model=${_selectedModel.value} chunk=${idx + 1}/${chunks.size} startMs=${chunk.startMs}")
-                            val chunkFileInfo = FileInfo(chunk.file.name, chunk.file.length(), fileInfo.mimeType)
+                            android.util.Log.d("DiagTrunc", "file=${workInfo.name} mime=${workInfo.mimeType} size=${workInfo.size} durMs=${retrieverDurationMs} needsChunk=${needsChunking} base64Len=${chunkBase64.length} provider=${_selectedProvider.value} model=${_selectedModel.value} chunk=${idx + 1}/${chunks.size} startMs=${chunk.startMs}")
+                            val chunkFileInfo = FileInfo(chunk.file.name, chunk.file.length(), workInfo.mimeType)
                             android.util.Log.d("TranscriptionVM", "transcribing chunk ${idx + 1}/${chunks.size} start=${chunk.startMs} dur=${chunk.durationMs}")
                             val res = transcribeSingle(chunkBase64, chunkFileInfo)
                             val chunkResult = res.getOrElse { e ->
@@ -262,7 +308,7 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                         com.example.data.AudioChunker.cleanupChunks(chunks)
                         val failCopy = failed
                         if (failCopy != null) {
-                            _transcriptionState.value = TranscriptionState.Error(failCopy.message ?: "Erro na transcrição chunk ${failCopy.localizedMessage}")
+                            _transcriptionState.value = transcriptionError(failCopy, "Erro na transcrição chunk ${failCopy.localizedMessage}")
                             return@launch
                         }
                         if (allTexts.isEmpty()) {
@@ -288,15 +334,15 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                         mergedDurationMs = transcriptionResult.durationMs
                     }
                 } else {
-                    val base64Data = withContext(Dispatchers.IO) { readUriAsBase64(uri) }
+                    val base64Data = withContext(Dispatchers.IO) { readUriAsBase64(workUri) }
                     if (base64Data == null) {
                         _transcriptionState.value = TranscriptionState.Error("Não foi possível ler o arquivo de áudio selecionado.")
                         return@launch
                     }
-                    android.util.Log.d("DiagTrunc", "file=${fileInfo.name} mime=${fileInfo.mimeType} size=${fileInfo.size} durMs=${retrieverDurationMs} needsChunk=${needsChunking} base64Len=${base64Data.length} provider=${_selectedProvider.value} model=${_selectedModel.value}")
-                    val res = transcribeSingle(base64Data, fileInfo)
+                    android.util.Log.d("DiagTrunc", "file=${workInfo.name} mime=${workInfo.mimeType} size=${workInfo.size} durMs=${retrieverDurationMs} needsChunk=${needsChunking} base64Len=${base64Data.length} provider=${_selectedProvider.value} model=${_selectedModel.value}")
+                    val res = transcribeSingle(base64Data, workInfo)
                     transcriptionResult = res.getOrElse { e ->
-                        _transcriptionState.value = TranscriptionState.Error(e.message ?: "Erro desconhecido na transcrição.")
+                        _transcriptionState.value = transcriptionError(e, "Erro desconhecido na transcrição.")
                         return@launch
                     }
                     mergedDurationMs = transcriptionResult.durationMs
@@ -323,7 +369,7 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                     ?: retrieverDurationMs
 
                 val savedAudioUri = withContext(Dispatchers.IO) {
-                    saveUriToInternalStorage(uri, fileInfo.name)
+                    saveUriToInternalStorage(workUri, workInfo.name)
                 } ?: uri
 
                 // Forma de onda: decode on-device uma vez; falha aqui só zera os picos.
@@ -337,10 +383,10 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                 }
 
                 val newEntity = TranscriptionEntity(
-                    title = fileInfo.name.substringBeforeLast("."),
-                    fileName = fileInfo.name,
-                    fileSize = fileInfo.size,
-                    mimeType = fileInfo.mimeType,
+                    title = workInfo.name.substringBeforeLast("."),
+                    fileName = workInfo.name,
+                    fileSize = workInfo.size,
+                    mimeType = workInfo.mimeType,
                     transcriptText = transcriptText,
                     modelUsed = _selectedModel.value,
                     audioUri = savedAudioUri.toString(),

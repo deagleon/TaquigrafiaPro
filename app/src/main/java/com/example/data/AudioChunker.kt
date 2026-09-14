@@ -16,7 +16,7 @@ import java.nio.ByteBuffer
 object AudioChunker {
     private const val TAG = "AudioChunker"
     private const val DEFAULT_CHUNK_MS = 5 * 60 * 1000 // 5 min
-    private const val MAX_CHUNK_MS = 8 * 60 * 1000 // 8 min soft limit
+    private const val MAX_CHUNK_MS = 5 * 60 * 1000 // 5 min — 5:26 (326s) deve chunkar para evitar alucinação Whisper em cauda de silêncio
     const val VAD_CHUNK_MS = 2 * 60 * 1000 // 2 min for silence
     private const val SILENCE_RATIO_THRESHOLD = 0.3
     private const val GAP_THRESHOLD_S = 5.0

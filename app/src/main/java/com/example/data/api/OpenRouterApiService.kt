@@ -20,4 +20,12 @@ interface OpenRouterApiService {
         @Header("X-OpenRouter-Title") title: String = "Taquigrafia Pro",
         @Body request: OpenRouterChatCompletionRequest
     ): OpenRouterChatCompletionResponse
+
+    @POST("chat/completions")
+    suspend fun multimodalChatCompletion(
+        @Header("Authorization") authorization: String,
+        @Header("HTTP-Referer") referer: String = "https://ai.studio/build",
+        @Header("X-OpenRouter-Title") title: String = "Taquigrafia Pro",
+        @Body request: OpenRouterMultimodalChatRequest
+    ): OpenRouterChatCompletionResponse
 }

@@ -71,7 +71,6 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
@@ -115,6 +114,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -149,6 +150,7 @@ import com.example.data.TranscriptionEntity
 import com.example.data.WaveformUtils
 import com.example.data.provider.ModelCatalog
 import com.example.ui.theme.MyApplicationTheme
+import com.example.ui.ErrorAction
 import com.example.ui.TranscriptionState
 import com.example.ui.TranscriptionViewModel
 import kotlinx.coroutines.Dispatchers
@@ -276,6 +278,7 @@ fun MainAppScreen() {
                     DashboardView(
                         viewModel = viewModel,
                         history = history,
+                        onOpenSettings = { currentScreen = Screen.Settings },
                         onPickFile = { filePickerLauncher.launch("audio/*") },
                         onViewDetail = { id ->
                             selectedTranscriptionId = id
@@ -362,7 +365,8 @@ fun DashboardView(
     viewModel: TranscriptionViewModel,
     history: List<TranscriptionEntity>,
     onPickFile: () -> Unit,
-    onViewDetail: (Int) -> Unit
+    onViewDetail: (Int) -> Unit,
+    onOpenSettings: () -> Unit = {}
 ) {
     val selectedFile by viewModel.selectedFile.collectAsState()
     val transcriptionState by viewModel.transcriptionState.collectAsState()
@@ -561,6 +565,18 @@ fun DashboardView(
                         }
                     }
 
+                    if (selectedFile != null &&
+                        ModelCatalog.needsWavConversion(currentModel, selectedFile!!.name)
+                    ) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "O modelo Meta exige WAV — vamos converter o áudio automaticamente.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("wav_autoconvert_hint")
+                        )
+                    }
+
                     Spacer(modifier = Modifier.height(16.dp))
 
                     AnimatedVisibility(visible = transcriptionState !is TranscriptionState.Idle) {
@@ -585,28 +601,47 @@ fun DashboardView(
                                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                                 }
                                 is TranscriptionState.Error -> {
-                                    Row(
+                                    val errState = transcriptionState as TranscriptionState.Error
+                                    Column(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .background(
                                                 MaterialTheme.colorScheme.errorContainer,
                                                 shape = MaterialTheme.shapes.small
                                             )
-                                            .padding(12.dp),
-                                        verticalAlignment = Alignment.CenterVertically
+                                            .padding(12.dp)
                                     ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Warning,
-                                            contentDescription = "Erro",
-                                            tint = MaterialTheme.colorScheme.onErrorContainer
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text(
-                                            text = (transcriptionState as TranscriptionState.Error).message,
-                                            color = MaterialTheme.colorScheme.onErrorContainer,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            modifier = Modifier.weight(1f)
-                                        )
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = Icons.Default.Warning,
+                                                contentDescription = "Erro",
+                                                tint = MaterialTheme.colorScheme.onErrorContainer
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = errState.message,
+                                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                        }
+                                        if (errState.action == ErrorAction.RETRY_WITH_WHISPER) {
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                Button(
+                                                    onClick = { viewModel.retryWithWhisper() },
+                                                    modifier = Modifier.testTag("retry_whisper_button")
+                                                ) {
+                                                    Text("Tentar com Whisper")
+                                                }
+                                                OutlinedButton(
+                                                    onClick = onOpenSettings,
+                                                    modifier = Modifier.testTag("choose_model_button")
+                                                ) {
+                                                    Text("Escolher outro modelo")
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 else -> {}
@@ -874,10 +909,29 @@ fun DetailView(
         return String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
     }
 
-    fun applySpeed(mp: android.media.MediaPlayer) {
+    fun applySpeed(mp: android.media.MediaPlayer, speed: Float = playbackSpeed) {
         try {
-            mp.playbackParams = mp.playbackParams.setSpeed(playbackSpeed)
+            mp.playbackParams = mp.playbackParams.setSpeed(speed)
         } catch (_: Exception) { }
+    }
+
+    // Alguns aparelhos retomam a reproducao sozinhos depois de um seekTo em
+    // estado Prepared (NuPlayer). O audio toca sem ninguem pedir e a UI, que
+    // continua marcando "pausado", congela. Reconfirmamos a pausa apos o seek.
+    val pauseGuardScope = rememberCoroutineScope()
+    fun keepPaused(mp: android.media.MediaPlayer) {
+        if (isPlaying) return
+        pauseGuardScope.launch {
+            for (recheckMs in PAUSE_RECHECK_MS) {
+                kotlinx.coroutines.delay(recheckMs)
+                if (isPlaying || isUserSeeking) return@launch
+                val playing = try { mp.isPlaying } catch (_: IllegalStateException) { false }
+                if (playing) {
+                    android.util.Log.d("TaquiPlayer", "reproducao iniciada sem pedido; pausando de volta")
+                    try { mp.pause() } catch (_: Exception) {}
+                }
+            }
+        }
     }
 
     LaunchedEffect(audioUri) {
@@ -912,7 +966,7 @@ fun DetailView(
                     }
                 }
                 mediaPlayer = mp
-                applySpeed(mp)
+                keepPaused(mp)
                 try {
                     val mpDur = mp.duration
                     if (mpDur > 500) duration = mpDur
@@ -948,8 +1002,10 @@ fun DetailView(
         }
     }
 
-    LaunchedEffect(playbackSpeed, mediaPlayer) {
-        mediaPlayer?.let { applySpeed(it) }
+    // Velocidade so se aplica com o audio rodando: setPlaybackParams em player
+    // pausado tambem faz alguns aparelhos voltarem a tocar sozinhos.
+    LaunchedEffect(playbackSpeed, mediaPlayer, isPlaying) {
+        if (isPlaying) mediaPlayer?.let { applySpeed(it, playbackSpeed) }
     }
 
     DisposableEffect(Unit) {
@@ -1113,7 +1169,9 @@ fun DetailView(
             val upper = if (duration > 0) duration else 0
             val target = (currentPosition + deltaMs).coerceIn(0, upper)
             currentPosition = target
-            try { mediaPlayer?.seekTo(target) } catch (e: Exception) { e.printStackTrace() }
+            val mp = mediaPlayer ?: return
+            try { mp.seekTo(target) } catch (e: Exception) { e.printStackTrace() }
+            keepPaused(mp)
         }
 
         PlayerCard(
@@ -1135,7 +1193,7 @@ fun DetailView(
                 } else {
                     try {
                         val playing = try { mp.isPlaying } catch (_: IllegalStateException) { false }
-                        if (playing) { try { mp.pause() } catch (_: Exception) {}; isPlaying = false; pauseAnchorMs = currentPosition }
+                        if (playing) { try { mp.pause() } catch (_: Exception) {}; isPlaying = false; pauseAnchorMs = currentPosition; keepPaused(mp) }
                         else {
                             val anchor = pauseAnchorMs
                             val target = if (anchor != null && currentPosition == anchor) resumeTargetMs(anchor) else currentPosition
@@ -1143,6 +1201,7 @@ fun DetailView(
                             try {
                                 try { mp.seekTo(target) } catch (_: Exception) {}
                                 currentPosition = target
+                                applySpeed(mp, playbackSpeed)
                                 mp.start(); isPlaying = true
                             } catch (e: Exception) { e.printStackTrace(); Toast.makeText(context, "Falha ao iniciar áudio: ${e.message} (emulador foi iniciado com -no-audio)", Toast.LENGTH_LONG).show() }
                         }
@@ -1162,7 +1221,9 @@ fun DetailView(
                 sliderDragging = false
                 isUserSeeking = false
                 currentPosition = dragValue.toInt()
-                try { mediaPlayer?.seekTo(dragValue.toInt()) } catch (e: Exception) { e.printStackTrace() }
+                val mp = mediaPlayer
+                try { mp?.seekTo(dragValue.toInt()) } catch (e: Exception) { e.printStackTrace() }
+                mp?.let { keepPaused(it) }
             },
             onSkip = { seekBy(it) },
             onSpeedChange = {
@@ -1269,13 +1330,12 @@ fun DetailView(
                 isExpanded = false
             },
             onParagraphClick = { para ->
+                // Tocar no Trecho posiciona o audio sem iniciar a reproducao.
                 try {
                     currentPosition = para.startMs
-                    mediaPlayer?.seekTo(para.startMs)
                     val mp = mediaPlayer
-                    if (mp != null && !isPlaying) {
-                        try { mp.start(); isPlaying = true } catch (_: Exception) {}
-                    }
+                    try { mp?.seekTo(para.startMs) } catch (_: Exception) {}
+                    mp?.let { keepPaused(it) }
                 } catch (_: Exception) {
                     currentPosition = para.startMs
                 }
@@ -1289,6 +1349,8 @@ private val PLAYBACK_SPEEDS = listOf(0.75f, 0.85f, 1f, 1.15f, 1.25f, 1.5f)
 private const val MIN_LOOP_SPAN_MS = 500
 /** Hold-repeat cadence: ±1s per tick while pressed. */
 private const val HOLD_TICK_MS = 150L
+/** Re-checks de pausa depois de seek: aparelho pode retomar o audio sozinho. */
+private val PAUSE_RECHECK_MS = longArrayOf(120L, 300L, 500L)
 
 /** Repeat jump for [posMs] inside [loop], or null to keep playing. */
 internal fun loopRepeatTarget(posMs: Int, loop: Pair<Int, Int>?): Int? =
@@ -1310,10 +1372,18 @@ private fun formatSpeed(speed: Float): String =
     if (speed == speed.toInt().toFloat()) "${speed.toInt()}x" else "${speed}x"
 
 @Composable
-private fun PlayerSmallButton(label: String, testTag: String, highlight: Boolean = true, onClick: () -> Unit) {
+private fun PlayerSmallButton(
+    label: String,
+    testTag: String,
+    highlight: Boolean = true,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
     TextButton(
         onClick = onClick,
-        modifier = Modifier.testTag(testTag),
+        modifier = modifier
+            .testTag(testTag)
+            .focusProperties { canFocus = false },
         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
     ) {
         Text(
@@ -1417,12 +1487,26 @@ private fun WaveformBar(
             )
             }
             .pointerInput(durationMs, peaks, selectingLoop) {
+                var dragSeeking = false
                 detectHorizontalDragGestures(
                     onDragStart = { offset ->
+                        dragSeeking = false
                         if (selectingLoop) selectAnchorMs = xToMs(offset.x, size.width.toFloat())
                     },
-                    onDragEnd = { selectAnchorMs = null },
-                    onDragCancel = { selectAnchorMs = null },
+                    onDragEnd = {
+                        selectAnchorMs = null
+                        if (dragSeeking && !selectingLoop) {
+                            dragSeeking = false
+                            onSeekFinished()
+                        }
+                    },
+                    onDragCancel = {
+                        selectAnchorMs = null
+                        if (dragSeeking && !selectingLoop) {
+                            dragSeeking = false
+                            onSeekFinished()
+                        }
+                    },
                     onHorizontalDrag = { change, _ ->
                         change.consume()
                         holdFired = false
@@ -1436,6 +1520,7 @@ private fun WaveformBar(
                                 }
                             }
                         } else {
+                            dragSeeking = true
                             onSeekPreview(xToMs(change.position.x, size.width.toFloat()).toFloat())
                         }
                     }
@@ -1465,7 +1550,18 @@ private fun WaveformBar(
             )
         }
         val headX = fraction * size.width
-        drawLine(playheadColor, Offset(headX, 0f), Offset(headX, size.height), strokeWidth = 2.dp.toPx())
+        // Posicao atual integrada a timeline: ponto de arraste em vez de barra vertical isolada.
+        val thumbR = 5.dp.toPx()
+        drawCircle(
+            color = playheadColor,
+            radius = thumbR,
+            center = Offset(headX.coerceIn(thumbR, (size.width - thumbR).coerceAtLeast(thumbR)), size.height / 2f)
+        )
+        drawCircle(
+            color = Color.White,
+            radius = 2.dp.toPx(),
+            center = Offset(headX.coerceIn(thumbR, (size.width - thumbR).coerceAtLeast(thumbR)), size.height / 2f)
+        )
     }
 }
 
@@ -1487,6 +1583,7 @@ private fun PlayerCard(
     onSkip: (Int) -> Unit,
     onSpeedChange: () -> Unit,
     peaks: List<Float>? = null,
+    // Laco oculto temporariamente: parametros mantidos para reativacao futura, sem UI.
     loopRangeMs: Pair<Int, Int>? = null,
     loopArmed: Boolean = false,
     onLoopToggle: () -> Unit = {},
@@ -1499,16 +1596,17 @@ private fun PlayerCard(
             shape = MaterialTheme.shapes.medium,
             elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp)
         ) {
-            Column(modifier = Modifier.padding(12.dp)) {
+            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = if (compact) 8.dp else 12.dp)) {
                 if (!compact) {
                     Text(
-                        text = "Áudio original · ${formatTime(duration)}",
+                        text = "Áudio original",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("player_title")
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                 }
-                
+
                 if (audioInitError != null) {
                     Text(
                         text = audioInitError ?: "",
@@ -1517,99 +1615,102 @@ private fun PlayerCard(
                         fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
                     )
                 } else {
+                    // Linha 1: acoes centralizadas. Play e acao principal; -5s/+5s secundarios neutros.
+                    val playSize = if (compact) 40.dp else 44.dp
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.align(Alignment.Center),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            PlayerSmallButton(label = "-5s", testTag = "skip_back_button", highlight = false, onClick = { onSkip(-5_000) })
+                            IconButton(
+                                onClick = onPlayPause,
+                                modifier = Modifier
+                                    .size(playSize)
+                                    .background(MaterialTheme.colorScheme.primary, shape = CircleShape)
+                                    .focusProperties { canFocus = false }
+                                    .testTag("play_pause_button")
+                            ) {
+                                if (isPlaying) {
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(modifier = Modifier.size(width = 4.dp, height = 12.dp).background(MaterialTheme.colorScheme.onPrimary))
+                                        Box(modifier = Modifier.size(width = 4.dp, height = 12.dp).background(MaterialTheme.colorScheme.onPrimary))
+                                    }
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = "Tocar",
+                                        tint = MaterialTheme.colorScheme.onPrimary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                            PlayerSmallButton(label = "+5s", testTag = "skip_forward_button", highlight = false, onClick = { onSkip(5_000) })
+                        }
+                        PlayerSmallButton(
+                            label = formatSpeed(playbackSpeed),
+                            testTag = "speed_button",
+                            highlight = playbackSpeed != 1f,
+                            modifier = Modifier.align(Alignment.CenterEnd),
+                            onClick = onSpeedChange
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(if (compact) 6.dp else 8.dp))
+                    // Linha 2: posicao. Timeline ocupa quase toda a largura (80-90%).
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        IconButton(
-                            onClick = onPlayPause,
-                            modifier = Modifier
-                                .size(36.dp)
-                                .background(MaterialTheme.colorScheme.primary, shape = CircleShape)
-                                .testTag("play_pause_button")
-                        ) {
-                            if (isPlaying) {
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Box(modifier = Modifier.size(width = 4.dp, height = 12.dp).background(MaterialTheme.colorScheme.onPrimary))
-                                    Box(modifier = Modifier.size(width = 4.dp, height = 12.dp).background(MaterialTheme.colorScheme.onPrimary))
-                                }
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Default.PlayArrow,
-                                    contentDescription = "Tocar",
-                                    tint = MaterialTheme.colorScheme.onPrimary,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        }
-                        PlayerSmallButton(label = "-5s", testTag = "skip_back_button", highlight = false, onClick = { onSkip(-5_000) })
-                        PlayerSmallButton(label = "+5s", testTag = "skip_forward_button", highlight = false, onClick = { onSkip(5_000) })
-
-                        Spacer(modifier = Modifier.width(12.dp))
-                        if (peaks == null) {
-                            if (!compact) {
-                                Slider(
-                                    value = if (sliderDragging) dragValue else currentPosition.toFloat(),
-                                    onValueChange = onSeekPreview,
-                                    onValueChangeFinished = onSeekFinished,
-                                    valueRange = 0f..(if (duration > 0) duration.toFloat() else 100f),
-                                    modifier = Modifier.weight(1f),
-                                    colors = SliderDefaults.colors(
-                                        thumbColor = MaterialTheme.colorScheme.primary,
-                                        activeTrackColor = MaterialTheme.colorScheme.primary,
-                                        inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.24f)
-                                    )
-                                )
-                            } else {
-                                Spacer(modifier = Modifier.weight(1f))
-                            }
-                        } else {
-                            Spacer(modifier = Modifier.weight(1f))
-                        }
-
-                        Spacer(modifier = Modifier.width(12.dp))
-
                         Text(
-                            text = "${formatTime(currentPosition)} / ${formatTime(duration)}",
+                            text = formatTime(if (sliderDragging) dragValue.toInt() else currentPosition),
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurface
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.widthIn(min = 40.dp).testTag("time_current")
                         )
-                        PlayerSmallButton(label = formatSpeed(playbackSpeed), testTag = "speed_button", highlight = playbackSpeed != 1f, onClick = onSpeedChange)
-                        IconButton(
-                            onClick = onLoopToggle,
-                            modifier = Modifier.size(32.dp).testTag("loop_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Repeat,
-                                contentDescription = "Laço",
-                                tint = if (loopRangeMs != null || loopArmed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        if (peaks == null) {
+                            Slider(
+                                value = if (sliderDragging) dragValue else currentPosition.toFloat(),
+                                onValueChange = onSeekPreview,
+                                onValueChangeFinished = onSeekFinished,
+                                valueRange = 0f..(if (duration > 0) duration.toFloat() else 100f),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .focusProperties { canFocus = false }
+                                    .testTag("timeline_slider"),
+                                colors = SliderDefaults.colors(
+                                    thumbColor = MaterialTheme.colorScheme.primary,
+                                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                                    inactiveTrackColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+                                )
+                            )
+                        } else {
+                            WaveformBar(
+                                peaks = peaks,
+                                positionMs = if (sliderDragging) dragValue.toInt() else currentPosition,
+                                durationMs = duration,
+                                barHeight = if (compact) 24.dp else 44.dp,
+                                onSeekPreview = onSeekPreview,
+                                onSeekFinished = onSeekFinished,
+                                loopRangeMs = null,
+                                selectingLoop = false,
+                                onLoopSelect = onLoopSelect,
+                                contentDescription = "Forma de onda",
+                                modifier = Modifier.weight(1f),
+                                onPlayPause = onPlayPause,
+                                onHoldTick = onHoldTick
                             )
                         }
-                    }
-                    if (peaks != null) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        WaveformBar(
-                            peaks = peaks,
-                            positionMs = if (sliderDragging) dragValue.toInt() else currentPosition,
-                            durationMs = duration,
-                            barHeight = if (compact) 24.dp else 44.dp,
-                            onSeekPreview = onSeekPreview,
-                            onSeekFinished = onSeekFinished,
-                            loopRangeMs = loopRangeMs,
-                            selectingLoop = loopArmed,
-                            onLoopSelect = onLoopSelect,
-                            contentDescription = buildString {
-                                append("Forma de onda")
-                                if (loopArmed) append(", selecione o laço arrastando")
-                                loopRangeMs?.let { append(", laço de ${formatTime(it.first)}→${formatTime(it.second)}") }
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            onPlayPause = onPlayPause,
-                            onHoldTick = onHoldTick
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = formatTime(duration),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.widthIn(min = 40.dp).testTag("time_total")
                         )
                     }
                 }
@@ -1639,7 +1740,7 @@ private fun TranscriptEditor(
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = if (isExpanded && isImeVisible) 4.dp else 8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = if (isExpanded && isImeVisible) 4.dp else 8.dp).testTag("transcript_header"),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1666,6 +1767,10 @@ private fun TranscriptEditor(
                         }
                     }
                 }
+                androidx.compose.material3.HorizontalDivider(
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                    thickness = 1.dp
+                )
                 if (isExpanded) {
                     val scrollState = rememberScrollState()
                     val highlightBg = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
@@ -1711,7 +1816,7 @@ private fun TranscriptEditor(
                         }
                     }
                     Box(
-                        modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp).padding(bottom = 12.dp).testTag("transcript_body_text")
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp).padding(top = 8.dp, bottom = 12.dp).testTag("transcript_body_text")
                     ) {
                         androidx.compose.runtime.CompositionLocalProvider(
                             LocalTextSelectionColors provides TextSelectionColors(
@@ -1747,8 +1852,8 @@ private fun TranscriptEditor(
                 } else {
                     LazyColumn(
                         state = listState,
-                        modifier = Modifier.fillMaxSize().testTag("transcript_body_text"),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        modifier = Modifier.fillMaxSize().clipToBounds().testTag("transcript_body_text"),
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 16.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         itemsIndexed(timedParagraphs) { idx, para ->
@@ -2009,7 +2114,9 @@ fun SettingsView(
 
                 var expanded by remember { mutableStateOf(false) }
                 val modelsList = if (providerState == "openrouter") {
-                    ModelCatalog.openRouterTranscriptionModels.map { it.id to it.label }
+                    ModelCatalog.openRouterTranscriptionModels.map {
+                        it.id to (it.label + if (ModelCatalog.requiresWav(it.id)) " • WAV automático" else "")
+                    }
                 } else {
                     ModelCatalog.geminiModels.map { it.id to it.label }
                 }
@@ -2347,5 +2454,3 @@ fun SoundWaveVisual(isAnimating: Boolean) {
         }
     }
 }
-
-

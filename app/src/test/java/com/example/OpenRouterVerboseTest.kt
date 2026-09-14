@@ -7,17 +7,20 @@ import org.junit.Test
 class OpenRouterVerboseTest {
 
     private fun supportsVerbose(model: String): Boolean = model.lowercase().let { m ->
-        "whisper" in m || "gpt-4o-mini-transcribe" in m || "gpt-4o-transcribe" in m || "gpt-transcribe" in m || "chirp" in m
+        // Sincronizado com OpenRouterTranscriptionProvider: apenas whisper/chirp via OpenRouter.
+        // gpt-4o-mini-transcribe falha com 400 "does not support response_format verbose_json" (log 2026-09-01).
+        "whisper" in m || "chirp" in m
     }
 
-    @Test fun `gpt-4o-mini-transcribe supports verbose`() {
+    @Test fun `gpt-4o-mini-transcribe does NOT support verbose via OpenRouter`() {
         val m = "openai/gpt-4o-mini-transcribe"
         val supports = supportsVerbose(m)
-        assertTrue("gpt-4o-mini-transcribe should support verbose_json", supports)
+        assertFalse("gpt-4o-mini-transcribe via OpenRouter retorna 400 verbose_json, deve usar plain json", supports)
     }
 
-    @Test fun `gpt-4o-transcribe supports verbose`() {
-        assertTrue(supportsVerbose("openai/gpt-4o-transcribe"))
+    @Test fun `gpt-4o-transcribe does NOT support verbose via OpenRouter by default`() {
+        // Até prova em log, tratamos como plain json para evitar 400; fallback cobre caso suporte futuro.
+        assertFalse(supportsVerbose("openai/gpt-4o-transcribe"))
     }
 
     @Test fun `whisper supports verbose`() {

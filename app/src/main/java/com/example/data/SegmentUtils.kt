@@ -44,8 +44,11 @@ object SegmentUtils {
         // Pass 1: Remove immediate adjacent duplicate segments (normalizado)
         val pass1 = pass1AdjacentDedup(valid, aggressive)
 
+        if (!aggressive) {
+            // Conservador: só adjacent dedup — ciclo e 4-gram desabilitados para não cortar 90% de plenária legítima
+            return pass1.ifEmpty { null }
+        }
         if (pass1.size < 4) return pass1.ifEmpty { null }
-
         // Pass 2: Detect and collapse multi-segment cycle repetition loops
         val kRange = if (aggressive) 2..12 else 2..8
         val pass2 = mutableListOf<Segment>()
@@ -102,11 +105,12 @@ object SegmentUtils {
             }
             pass3.add(seg)
         }
-        // Guard: if dedup collapsed below threshold of long transcript, it's likely a false-positive
+        // Guard: se colapso >60% em transcrição longa, provavelmente falso-positivo → reverte para Pass1 (adjacent only)
+        // Não mantém cleaned mesmo se repetitivo, para não cortar 90% de plenária legítima (user report)
         val candidate = if (pass3.isEmpty() && pass2.isNotEmpty()) pass2 else pass3
         val thr = threshold.coerceIn(0.4f, 0.6f).toDouble()
         if (valid.size > 30 && candidate.size < valid.size * thr) {
-            try { android.util.Log.w("OpenRouterSTT", "segment over-pruned raw=${valid.size} cleaned=${candidate.size} thr=$thr, reverting to Pass1") } catch (_: Exception) {}
+            try { android.util.Log.w("OpenRouterSTT", "segment over-pruned raw=${valid.size} cleaned=${candidate.size} thr=$thr, reverting to Pass1 (corte 90% desativado)") } catch (_: Exception) {}
             return pass1.ifEmpty { null }
         }
         return candidate.ifEmpty { null }
@@ -170,6 +174,28 @@ object SegmentUtils {
             if (naNoDigits == nbNoDigits) return false
             return true
         }
+        // Fix 5:26 truncated duplicate: "Obrigado, vereadora Adriana... encaminhar votos?" vs truncated without last words
+        // Se uma é prefixo da outra com >85% de overlap, é alucinação truncada, não voto distinto.
+        if (na.length >= 40 || nb.length >= 40) {
+            val longer = if (na.length > nb.length) na else nb
+            val shorter = if (na.length > nb.length) nb else na
+            if (longer.startsWith(shorter) && shorter.length.toDouble() / longer.length > 0.85) {
+                val longerNoDigits = longer.replace(Regex("\\d+"), " ").replace(Regex("\\s+"), " ").trim()
+                val shorterNoDigits = shorter.replace(Regex("\\d+"), " ").replace(Regex("\\s+"), " ").trim()
+                // Se diferença é só truncamento, não números distintos, considera paraphrased
+                if (longerNoDigits.startsWith(shorterNoDigits)) return true
+            }
+            // Para frases longas, tolera distância de edição proporcional (até 10% ou 10 chars)
+            val maxDist = (minOf(longer.length, 80) * 0.12).toInt().coerceAtLeast(3).coerceAtMost(12)
+            if (levenshtein(na, nb) <= maxDist) {
+                val naNoDigits = na.replace(Regex("\\d+"), " ").replace(Regex("\\s+"), " ").trim()
+                val nbNoDigits = nb.replace(Regex("\\d+"), " ").replace(Regex("\\s+"), " ").trim()
+                if (naNoDigits == nbNoDigits) return false
+                // Evita colapsar votos de vereadores diferentes: "Vereador Marcelo Mendes vota sim" vs "Vereador Marcelo Tchelo vota sim"
+                // têm nomes diferentes, mas distância pode ser pequena. Verifica se palavras de nome diferem muito.
+                return true
+            }
+        }
         return false
     }
     private fun fourGramCountsSegments(segments: List<Segment>): Map<String, Int> {
@@ -228,7 +254,10 @@ object SegmentUtils {
      * @param aggressive true = Levenshtein + k 2..12 + 4-gram filtering; false = exact only, k 2..8, no 4-gram
      */
     fun cleanTranscriptText(raw: String, aggressive: Boolean, threshold: Float = 0.5f): String {
-        val trimmed = raw.trim()
+        // Fix Cláudio Lima hallucination: gpt-4o-mini gerou repetições inline separadas por vírgulas em linha única.
+        // Antes splitParagraphs não detectava, então paras.size=1 e dedup não colapsava. Remove loops inline primeiro.
+        val afterInlineLoop = removeInlinePhraseLoops(raw.trim())
+        val trimmed = afterInlineLoop.trim()
         if (trimmed.isEmpty()) return trimmed
         val paras: List<String> = when {
             trimmed.contains("\n\n") -> trimmed.split(Regex("\n{2,}")).map { it.trim() }.filter { it.isNotEmpty() }
@@ -236,7 +265,7 @@ object SegmentUtils {
             else -> splitParagraphs(trimmed)
         }.ifEmpty { return trimmed }
 
-        // Pass A: remove duplicatas consecutivas
+        // Pass A: remove duplicatas consecutivas (exato ou Levenshtein se aggressive)
         val deduped = mutableListOf<String>()
         for (p in paras) {
             val norm = normalizeForComparison(p)
@@ -248,12 +277,18 @@ object SegmentUtils {
             if (isDup) continue
             deduped.add(p)
         }
+        if (!aggressive) {
+            // Conservador: só adjacent dedup, sem colapso de ciclo nem 4-gram — evita corte de 90% (issue 2026-09-01)
+            val early = deduped.joinToString("\n\n")
+            try { android.util.Log.d("DiagTrunc", "clean in=${trimmed.length} out=${early.length} paras in=${paras.size} out=${deduped.size} aggr=$aggressive conservative-only-adjacent") } catch (_: Exception) {}
+            return early
+        }
         if (deduped.size < 4) {
             val early = deduped.joinToString("\n\n")
             try { android.util.Log.d("DiagTrunc", "clean in=${trimmed.length} out=${early.length} paras in=${paras.size} out=${deduped.size} early=true aggr=$aggressive") } catch (_: Exception) {}
             return early
         }
-        val kRange = if (aggressive) 2..12 else 2..8
+        val kRange = 2..12
         val out = mutableListOf<String>()
         var idx = 0
         while (idx < deduped.size) {
@@ -278,33 +313,30 @@ object SegmentUtils {
                 out.add(deduped[idx]); idx++
             }
         }
-        // 4-gram filtering only when aggressive (avoids false-positive in conservative)
-        val filtered: List<String> = if (aggressive) {
-            val globalCounts = fourGramCountsParas(paras)
-            val tmp = mutableListOf<String>()
-            val keptGrams = mutableSetOf<String>()
-            for (para in out) {
-                if (para.trim().length < 40 && hasRepeatedFourGramPara(para, globalCounts)) {
-                    val words = normalizeForComparison(para).split(Regex("\\s+")).filter { it.isNotEmpty() }
-                    var isDup = false
-                    for (w in 0..words.size - 4) {
-                        val gram = words.subList(w, w + 4).joinToString(" ")
-                        if ((globalCounts[gram] ?: 0) > 3 && keptGrams.contains(gram)) { isDup = true; break }
-                    }
-                    if (isDup) {
-                        try { android.util.Log.d("SegmentUtils", "filter 4-gram para=${para.take(30)}") } catch (_: Exception) {}
-                        continue
-                    }
-                    for (w in 0..words.size - 4) {
-                        val gram = words.subList(w, w + 4).joinToString(" ")
-                        if ((globalCounts[gram] ?: 0) > 3) keptGrams.add(gram)
-                    }
+        // 4-gram filtering only when aggressive
+        val globalCounts = fourGramCountsParas(paras)
+        val tmp = mutableListOf<String>()
+        val keptGrams = mutableSetOf<String>()
+        for (para in out) {
+            if (para.trim().length < 40 && hasRepeatedFourGramPara(para, globalCounts)) {
+                val words = normalizeForComparison(para).split(Regex("\\s+")).filter { it.isNotEmpty() }
+                var isDup = false
+                for (w in 0..words.size - 4) {
+                    val gram = words.subList(w, w + 4).joinToString(" ")
+                    if ((globalCounts[gram] ?: 0) > 3 && keptGrams.contains(gram)) { isDup = true; break }
                 }
-                tmp.add(para)
+                if (isDup) {
+                    try { android.util.Log.d("SegmentUtils", "filter 4-gram para=${para.take(30)}") } catch (_: Exception) {}
+                    continue
+                }
+                for (w in 0..words.size - 4) {
+                    val gram = words.subList(w, w + 4).joinToString(" ")
+                    if ((globalCounts[gram] ?: 0) > 3) keptGrams.add(gram)
+                }
             }
-            tmp
-        } else out
-        val result = filtered.joinToString("\n\n")
+            tmp.add(para)
+        }
+        val result = tmp.joinToString("\n\n")
         try { android.util.Log.d("DiagTrunc", "clean in=${trimmed.length} out=${result.length} paras in=${paras.size} out=${result.split(Regex("\n\n")).size} aggr=$aggressive") } catch (_: Exception) {}
         return result
     }
@@ -393,7 +425,8 @@ object SegmentUtils {
             }
         }
 
-        // If clean segments exist but paragraph count differs (e.g. grouped text)
+        // If clean segments exist but paragraph count differs (e.g. grouped text),
+        // anchor trechos to real segment spans by text and interpolate the rest.
         if (!cleanSegs.isNullOrEmpty()) {
             val totalSegDuration = (cleanSegs.last().end * 1000).toInt().coerceAtLeast(1000)
             val effectiveDuration = audioDurationMs?.coerceAtLeast(1000) ?: totalSegDuration
@@ -435,6 +468,112 @@ object SegmentUtils {
         return s.lowercase(Locale.ROOT)
             .replace(Regex("[^\\p{L}\\p{Nd}]+"), " ")
             .trim()
+    }
+
+    /**
+     * Remove repetições intra-frase separadas por vírgula: "vereador Cláudio Lima, vereador Cláudio Lima, ..." -> "vereador Cláudio Lima".
+     * Detecta frase de 4..40 chars repetida 2+ vezes via ", phrase" (case-insensitive).
+     * Iterativo para colapsar cadeias longas (200 repetições).
+     */
+    fun removeInlinePhraseLoops(text: String): String {
+        if (text.length < 30) return text
+        // Regex: captura frase curta (4..40 chars sem quebras) repetida via ", " 2+ vezes.
+        // Ex: "vereador Cláudio Lima, vereador Cláudio Lima, vereador Cláudio Lima" -> "vereador Cláudio Lima"
+        val loopRegex = Regex("""(\b.{4,40}?\b)(?:\s*,\s*\1){2,}""", setOf(RegexOption.IGNORE_CASE))
+        var cur = text
+        var prev: String
+        var iterations = 0
+        do {
+            prev = cur
+            cur = cur.replace(loopRegex, "$1")
+            iterations++
+        } while (cur != prev && iterations < 5)
+        // Fallback heurístico para separação por vírgula sem regex (quando frases variam levemente em caixa/espaço):
+        // Se texto ainda tem >500 chars e é single-line com muitas vírgulas e baixa diversidade, colapsa via split por vírgula.
+        if (cur.length > 500 && !cur.contains("\n") && cur.count { it == ',' } >= 9) {
+            val parts = cur.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+            if (parts.size >= 10) {
+                val norms = parts.map { normalizeForComparison(it) }
+                val uniqueRatio = norms.toSet().size.toDouble() / norms.size
+                if (uniqueRatio < 0.5) {
+                    // Mantém apenas primeira ocorrência de cada frase normalizada consecutiva
+                    val deduped = mutableListOf<String>()
+                    for (p in parts) {
+                        val n = normalizeForComparison(p)
+                        val lastNorm = deduped.lastOrNull()?.let { normalizeForComparison(it) }
+                        if (lastNorm == n) continue
+                        // também colapsa paraphrased quando aggressive
+                        if (lastNorm != null && deduped.isNotEmpty()) {
+                            val last = deduped.last()
+                            if (isParaphrased(last, p)) continue
+                        }
+                        deduped.add(p)
+                    }
+                    // Se colapso reduziu >50%, provavelmente hallucination -> retorna colapsado
+                    if (deduped.size.toDouble() / parts.size < 0.5) {
+                        cur = deduped.joinToString(", ")
+                    }
+                }
+            }
+        }
+        return cur
+    }
+
+    /** Heurística: raw é alucinação repetitiva? Usa unique ratio + pass1 aggressive ratio. */
+    fun isRepetitiveHallucinationSegments(segments: List<Segment>?): Boolean {
+        if (segments == null || segments.size < 10) return false
+        val norms = segments.map { normalizeForComparison(it.text) }.filter { it.isNotEmpty() }
+        if (norms.isEmpty()) return false
+        val unique = norms.toSet().size
+        if (unique.toDouble() / norms.size < 0.5) return true
+        val valid = segments.filter { it.text.isNotBlank() && it.end >= it.start }.sortedBy { it.start }
+        val pass1AggSize = pass1AdjacentDedup(valid, aggressive = true).size
+        if (pass1AggSize.toDouble() / segments.size < 0.5) return true
+        return false
+    }
+
+    fun isRepetitiveHallucinationText(raw: String): Boolean {
+        val trimmed = raw.trim()
+        if (trimmed.length < 500) return false
+        // Detecção rápida para loops inline por vírgula em single-line (gpt-4o-mini): não depende de paras.size>=10
+        if (!trimmed.contains("\n") && trimmed.contains(",")) {
+            val commaParts = trimmed.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+            if (commaParts.size >= 10) {
+                val norms = commaParts.map { normalizeForComparison(it) }.filter { it.isNotEmpty() }
+                if (norms.isNotEmpty() && norms.toSet().size.toDouble() / norms.size < 0.5) return true
+                val dedupedComma = mutableListOf<String>()
+                for (p in commaParts) {
+                    val last = dedupedComma.lastOrNull()
+                    if (last != null && isParaphrased(last, p)) continue
+                    if (last != null && normalizeForComparison(last) == normalizeForComparison(p)) continue
+                    dedupedComma.add(p)
+                }
+                if (dedupedComma.size.toDouble() / commaParts.size < 0.5) return true
+            }
+            // Também tenta regex de loop inline diretamente
+            val cleanedViaRegex = removeInlinePhraseLoops(trimmed)
+            if (cleanedViaRegex.length < trimmed.length * 0.5) return true
+        }
+        val paras: List<String> = when {
+            trimmed.contains("\n\n") -> trimmed.split(Regex("\n{2,}")).map { it.trim() }.filter { it.isNotEmpty() }
+            trimmed.contains("\n") -> trimmed.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+            else -> splitParagraphs(trimmed)
+        }
+        if (paras.size < 10) return false
+        val norms = paras.map { normalizeForComparison(it) }.filter { it.isNotEmpty() }
+        if (norms.isEmpty()) return false
+        val unique = norms.toSet().size
+        if (unique.toDouble() / norms.size < 0.5) return true
+        // pass1 aggressive detecta paraphrased repetição (vota vs votou)
+        val dedupedAgg = mutableListOf<String>()
+        for (p in paras) {
+            val last = dedupedAgg.lastOrNull()
+            val isDup = if (last != null) isParaphrased(last, p) else false
+            if (isDup) continue
+            dedupedAgg.add(p)
+        }
+        if (dedupedAgg.size.toDouble() / paras.size < 0.5) return true
+        return false
     }
     private val segmentsAdapter: com.squareup.moshi.JsonAdapter<List<Segment>> by lazy {
         Moshi.Builder().add(KotlinJsonAdapterFactory()).build()

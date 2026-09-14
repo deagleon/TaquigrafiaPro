@@ -47,11 +47,11 @@ class EndToEndFixtureTest {
     }
     @Test
     fun `5_26 does not need chunking`() {
-        // 5:26 = 326s = 326_000ms < MAX_CHUNK_MS (480_000) and small file => no chunk
+        // Novo MAX 5min (300k): 5:26 =326k >300k deve chunkar para evitar alucinação Whisper plain json (log 2026-09-01)
         val smallSize = 7L * 1024 * 1024 // ~7MB typical AAC 128k for 5:26 speech
-        assertFalse("5:26 small file should NOT need chunk", AudioChunker.isChunkingNeeded(dur5_26, smallSize))
+        assertTrue("5:26 small file should need chunk with new 5min threshold", AudioChunker.isChunkingNeeded(dur5_26, smallSize))
         val fixtureSize = File("src/main/assets/test_5_26.m4a").let { if (it.exists()) it.length() else File("app/src/main/assets/test_5_26.m4a").let { f -> if (f.exists()) f.length() else File("assets/test_5_26.m4a").let { f2 -> if (f2.exists()) f2.length() else File("../assets/test_5_26.m4a").length() } } }
-        assertFalse("5:26 fixture (${fixtureSize}B) should NOT need chunk", AudioChunker.isChunkingNeeded(dur5_26, fixtureSize))
+        assertTrue("5:26 fixture (${fixtureSize}B) should need chunk", AudioChunker.isChunkingNeeded(dur5_26, fixtureSize))
     }
 
     @Test
@@ -67,12 +67,12 @@ class EndToEndFixtureTest {
 
     @Test
     fun `simulated 5_26 DiagTrunc expectations would be satisfied`() {
-        // Simulate 5:26 log expectations from brief: dur~326000 needsChunk=false base64Len~7M
-        // segments raw>30 cleaned>30 textLen>4000 words>600 DetailView >30 lines (40 paras)
+        // Simulate 5:26 log expectations: dur~326000 needsChunk=true (novo MAX 5min=300k) base64Len~7M
+        // Antes <8min não chunkava; agora chunk em 2 (300s+26s) para evitar alucinação gpt-4o-mini plain json
         val durMs = dur5_26
         val needsChunk = AudioChunker.isChunkingNeeded(durMs, 7L * 1024 * 1024)
         assertEquals(326_000, durMs)
-        assertFalse(needsChunk)
+        assertTrue(needsChunk)
         // base64Len for 7MB file ≈ 7*1024*1024*4/3 ≈ 9.8M chars, but brief says ~7M (allow >1M)
         val base64Len = (7L * 1024 * 1024 * 4 / 3).toInt()
         assertTrue("base64Len should be >1M for 5:26 (got $base64Len)", base64Len > 1_000_000)

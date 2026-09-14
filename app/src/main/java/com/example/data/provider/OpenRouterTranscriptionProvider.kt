@@ -36,16 +36,101 @@ class OpenRouterTranscriptionProvider(
         }
 
         val authHeader = "Bearer $activeKey"
-        val wantsTimestamps = prefs.getBoolean("openrouter_timestamps_enabled", true)
-        val supportsVerbose = request.model.lowercase().let { m ->
-            "whisper" in m || "gpt-4o-mini-transcribe" in m || "gpt-4o-transcribe" in m || "gpt-transcribe" in m || "chirp" in m
+        // Detecta modelos multimodais que devem usar chat/completions com input_audio (evita loop Whisper)
+        // Ex: openai/gpt-5.6-luna, openai/gpt-4o-audio-preview, google/gemini via OpenRouter
+        fun isMultimodalChatModel(model: String): Boolean {
+            val m = model.lowercase()
+            // Modelos STT dedicados usam audio/transcriptions
+            if ("transcribe" in m) return false
+            if ("whisper" in m) return false
+            if ("chirp" in m) return false
+            if ("voxtral" in m) return false
+            if ("parakeet" in m) return false
+            if ("nemotron" in m && "asr" in m) return false
+            if ("qwen" in m && "asr" in m) return false
+            if ("mai-transcribe" in m) return false
+            if ("fish" in m) return false
+            // Chat multimodais com audio — apenas gemini 3.7 e gpt 5.6 luna conforme solicitado
+            if ("luna" in m) return true
+            if ("gpt-5" in m) return true
+            if ("gpt-4o" in m) return true // mantido para compatibilidade caso usuário já tenha salvo
+            if ("gemini" in m) return true
+            if ("claude" in m) return true
+            if ("grok" in m) return true
+            return false
         }
-        val useVerbose = wantsTimestamps && supportsVerbose
+
         val base64Len = request.audioBase64.length
         if (base64Len > 25 * 1024 * 1024) {
             android.util.Log.w("OpenRouterSTT", "payload oversize base64Len=$base64Len >25MB, will rely on chunking")
         }
 
+        // Rota multimodal via chat/completions com input_audio (recomendado para 5:26 e Cláudio Lima)
+        if (isMultimodalChatModel(request.model)) {
+            android.util.Log.d("OpenRouterSTT", "multimodal chat route model=${request.model} base64Len=$base64Len")
+            val chatRequest = com.example.data.api.OpenRouterMultimodalChatRequest(
+                model = request.model,
+                messages = listOf(
+                    com.example.data.api.ChatMessageMultimodal(
+                        role = "system",
+                        content = listOf(com.example.data.api.ChatContentPart(type = "text", text = request.systemPrompt))
+                    ),
+                    com.example.data.api.ChatMessageMultimodal(
+                        role = "user",
+                        content = listOf(
+                            com.example.data.api.ChatContentPart(
+                                type = "text",
+                                text = "Transcreva o áudio acima seguindo RIGOROSAMENTE as instruções do sistema. Seja literal, não invente. Se inaudível, marque [inaudível]. NÃO resuma, NÃO truncue, transcreva do início ao fim. Áudio é de sessão plenária da Câmara Municipal."
+                            ),
+                            com.example.data.api.ChatContentPart(
+                                type = "input_audio",
+                                inputAudio = InputAudio(data = request.audioBase64, format = format)
+                            )
+                        )
+                    )
+                ),
+                temperature = 0.1,
+                maxTokens = 16384,
+                topP = 0.1
+            )
+            val chatResponse = try {
+                service.multimodalChatCompletion(
+                    authorization = authHeader,
+                    request = chatRequest
+                )
+            } catch (e: java.net.SocketTimeoutException) {
+                return Result.failure(IllegalStateException("Tempo de conexão esgotado (multimodal). Áudio grande pode levar alguns minutos — verifique sua conexão.", e))
+            } catch (e: java.io.IOException) {
+                if ((e.message ?: "").contains("timeout", ignoreCase = true)) {
+                    return Result.failure(IllegalStateException("Tempo de conexão esgotado (multimodal). Tente novamente.", e))
+                }
+                throw e
+            } catch (e: retrofit2.HttpException) {
+                val body = try { e.response()?.errorBody()?.string()?.take(600) ?: "" } catch (_: Exception) { "" }
+                android.util.Log.e("OpenRouterSTT", "multimodal HTTP ${e.code()} body=$body model=${request.model}")
+                return Result.failure(IllegalStateException("Erro ${e.code()} do OpenRouter (multimodal): ${body.ifEmpty { e.message() }}", e))
+            }
+            if (chatResponse.error != null) {
+                return Result.failure(IllegalStateException("Erro do OpenRouter (multimodal): ${chatResponse.error.message ?: "Erro sem mensagem"}"))
+            }
+            val rawText = chatResponse.choices?.firstOrNull()?.message?.content
+            if (rawText.isNullOrBlank()) {
+                return Result.failure(IllegalStateException("O modelo multimodal não retornou texto."))
+            }
+            val cleaned = com.example.data.SegmentUtils.cleanTranscriptText(rawText.trim())
+            return Result.success(TranscriptionResult(text = cleaned, segments = null, durationMs = null, language = "pt"))
+        }
+
+        val wantsTimestamps = prefs.getBoolean("openrouter_timestamps_enabled", true)
+        // OpenRouter: apenas whisper/chirp suportam verbose_json com segment timestamps.
+        // gpt-4o-mini-transcribe retorna 400 "does not support response_format verbose_json" (log 2026-09-01).
+        val supportsVerbose = request.model.lowercase().let { m ->
+            "whisper" in m || "chirp" in m
+        }
+        val useVerbose = wantsTimestamps && supportsVerbose
+
+        // Prompt contextual para Whisper/gpt-4o-mini: guia vocabulário parlamentar e evita loop autorregressivo em ruído (vereador Cláudio Lima).
+        val initialPrompt = "Transcrição de sessão plenária de votação na Câmara Municipal. Lista de presença e votos dos vereadores."
         suspend fun doTranscribe(
             responseFormat: String?,
             timestampGranularities: List<String>?,
@@ -57,13 +142,12 @@ class OpenRouterTranscriptionProvider(
                     inputAudio = InputAudio(data = request.audioBase64, format = format),
                     language = "pt",
                     temperature = 0.0,
-                    prompt = null,
+                    prompt = initialPrompt,
                     responseFormat = responseFormat,
                     timestampGranularities = timestampGranularities,
                 )
             )
         }
-
         fun httpErrorBody(e: retrofit2.HttpException): String = try {
             e.response()?.errorBody()?.string()?.take(600) ?: ""
         } catch (_: Exception) { "" }
@@ -106,6 +190,14 @@ class OpenRouterTranscriptionProvider(
             val body = httpErrorBody(e)
             android.util.Log.e("OpenRouterSTT", "HTTP ${e.code()} body=$body model=${request.model}")
             if (e.code() == 400) {
+                if (OpenRouterErrors.isContainerRefusal(body)) {
+                    return Result.failure(
+                        ContainerRefusedException(
+                            OpenRouterErrors.containerRefusedMessage(ModelCatalog.findLabel(request.model)),
+                            e
+                        )
+                    )
+                }
                 return Result.failure(IllegalStateException("Erro 400 do OpenRouter: ${body.ifEmpty { e.message() }} — tente outro modelo (whisper/gpt-4o-transcribe com timestamps) ou desative timestamps.", e))
             }
             throw e
@@ -130,6 +222,12 @@ class OpenRouterTranscriptionProvider(
                 }
                 return Result.success(TranscriptionResult(text = fbText, segments = null, durationMs = fallback.duration?.let { (it * 1000).toInt() }, language = fallback.language))
             }
+            val refusalBody = response.error.message ?: ""
+            if (OpenRouterErrors.isContainerRefusal(refusalBody)) {
+                return Result.failure(
+                    ContainerRefusedException(OpenRouterErrors.containerRefusedMessage(ModelCatalog.findLabel(request.model)))
+                )
+            }
             return Result.failure(IllegalStateException("Erro do OpenRouter: ${response.error.message ?: "Erro sem mensagem"}"))
         }
 
@@ -143,17 +241,24 @@ class OpenRouterTranscriptionProvider(
         val hallucinationAggressive = prefs.getBoolean("hallucination_aggressive", false)
         val hallucinationThreshold = prefs.getFloat("hallucination_threshold", 0.5f)
         val cleanedSegments = com.example.data.SegmentUtils.cleanAndDeduplicate(rawSegments, hallucinationAggressive, hallucinationThreshold)
-        // Guard: if segment dedup collapsed below threshold of long transcript, false-positive → revert to Pass1
+        // Guard: se colapso >60% em transcrição longa, falso-positivo → reverte para Pass1 (corte 90% desativado)
+        // Fix Cláudio Lima hallucination: se rawSegments é alucinação repetitiva, mantém cleaned mesmo com colapso grande.
+        val isSegmentRepetitive = com.example.data.SegmentUtils.isRepetitiveHallucinationSegments(rawSegments)
         val segments = cleanedSegments?.let { cs ->
             val rawSize = rawSegments?.size ?: 0
             val thr = hallucinationThreshold.coerceIn(0.4f, 0.6f)
             if (rawSize > 30 && cs.size < rawSize * thr) {
-                android.util.Log.w("OpenRouterSTT", "segment over-pruned raw=$rawSize cleaned=${cs.size} thr=$thr, reverting to Pass1")
-                rawSegments?.let { raw ->
-                    val valid = raw.filter { it.text.isNotBlank() && it.end >= it.start }.sortedBy { it.start }
-                    val pass1 = com.example.data.SegmentUtils.pass1AdjacentDedup(valid, hallucinationAggressive)
-                    if (pass1.size >= rawSize * thr) pass1 else raw
-                } ?: cs
+                if (isSegmentRepetitive) {
+                    android.util.Log.w("OpenRouterSTT", "segment over-pruned raw=$rawSize cleaned=${cs.size} thr=$thr repetitive=$isSegmentRepetitive, keeping cleaned")
+                    cs
+                } else {
+                    android.util.Log.w("OpenRouterSTT", "segment over-pruned raw=$rawSize cleaned=${cs.size} thr=$thr, reverting to Pass1")
+                    rawSegments?.let { raw ->
+                        val valid = raw.filter { it.text.isNotBlank() && it.end >= it.start }.sortedBy { it.start }
+                        val pass1 = com.example.data.SegmentUtils.pass1AdjacentDedup(valid, hallucinationAggressive)
+                        if (pass1.size >= rawSize * thr) pass1 else raw
+                    } ?: cs
+                }
             } else cs
         } ?: cleanedSegments
         val cleanRawTranscript = if (!segments.isNullOrEmpty()) {
@@ -162,14 +267,20 @@ class OpenRouterTranscriptionProvider(
             rawTranscript.trim()
         }
 
-        // Barreira textual final: remove ciclos em texto puro
-        // Guard: se limpeza cortar >50% de texto longo, é provável falso-positivo → preserva original
+        // Barreira textual final: remove ciclos em texto puro — desativada corte >50% para não truncar 90% (user report 2026-09-01)
+        // Fix Cláudio Lima hallucination: se dedup cortou >50% mas texto bruto é alucinação repetitiva, MANTÉM deduped (não reverte).
         val dedupedRaw = com.example.data.SegmentUtils.cleanTranscriptText(cleanRawTranscript, hallucinationAggressive)
         android.util.Log.d("DiagTrunc", "clean in=${cleanRawTranscript.length} out=${dedupedRaw.length} segments raw=${rawSegments?.size} cleaned=${segments?.size}")
+        val isRepetitive = com.example.data.SegmentUtils.isRepetitiveHallucinationText(cleanRawTranscript)
         val finalRawText = when {
             dedupedRaw != cleanRawTranscript && dedupedRaw.length < cleanRawTranscript.length * 0.5 && cleanRawTranscript.length > 1000 -> {
-                android.util.Log.w("OpenRouterSTT", "cleanTranscriptText over-pruned raw ${cleanRawTranscript.length} -> ${dedupedRaw.length}, reverting")
-                cleanRawTranscript
+                if (isRepetitive) {
+                    android.util.Log.w("OpenRouterSTT", "cleanTranscriptText pruned raw ${cleanRawTranscript.length} -> ${dedupedRaw.length} repetitive=$isRepetitive, keeping deduped (was reverting)")
+                    dedupedRaw
+                } else {
+                    android.util.Log.w("OpenRouterSTT", "cleanTranscriptText over-pruned raw ${cleanRawTranscript.length} -> ${dedupedRaw.length}, reverting to raw (corte 90% desativado)")
+                    cleanRawTranscript
+                }
             }
             dedupedRaw != cleanRawTranscript -> {
                 android.util.Log.w("OpenRouterSTT", "cleanTranscriptText pruned raw ${cleanRawTranscript.length} -> ${dedupedRaw.length}")
@@ -177,7 +288,6 @@ class OpenRouterTranscriptionProvider(
             }
             else -> cleanRawTranscript
         }
-        android.util.Log.d("Halluc", "rawTextLen=${cleanRawTranscript.length} segmentsRaw=${rawSegments?.size} cleaned=${segments?.size} dedupedRawLen=${dedupedRaw.length} finalLen=${finalRawText.length} first3=${rawSegments?.take(3)?.map{com.example.data.SegmentUtils.normalizeForComparison(it.text)}} last3=${rawSegments?.takeLast(3)?.map{com.example.data.SegmentUtils.normalizeForComparison(it.text)}}")
 
         // Detecção de truncamento suspeitosamente curto vs duração (5min ~4500 chars, 26min ~23000 chars)
         durationMs?.let { dur ->

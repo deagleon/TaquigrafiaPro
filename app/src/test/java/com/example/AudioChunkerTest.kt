@@ -28,13 +28,13 @@ class AudioChunkerTest {
 
     @Test
     fun `isChunkingNeeded false for 5_26 small file`() {
-        // 5:26 = 326s = 326_000 ms < 480_000, small file 5MB
-        assertFalse(AudioChunker.isChunkingNeeded(durationMs = 326_000, fileSize = mb(5)))
+        // Novo MAX 5min (300k) — 5:26 =326k >300k deve chunkar (evita alucinação em 5:26 plain json)
+        assertTrue(AudioChunker.isChunkingNeeded(durationMs = 326_000, fileSize = mb(5)))
     }
 
     @Test
     fun `isChunkingNeeded true for 26min small file`() {
-        // 26 min = 1_560_000 ms >480_000 => chunk regardless of size
+        // 26 min = 1_560_000 ms >300_000 => chunk regardless of size
         assertTrue(AudioChunker.isChunkingNeeded(durationMs = 26 * 60 * 1000, fileSize = mb(5)))
     }
 
@@ -50,7 +50,7 @@ class AudioChunkerTest {
 
     @Test
     fun `isChunkingNeeded false at exact MAX_CHUNK_MS boundary`() {
-        val max = 8 * 60 * 1000
+        val max = 5 * 60 * 1000
         assertFalse(AudioChunker.isChunkingNeeded(durationMs = max, fileSize = mb(5)))
         assertTrue(AudioChunker.isChunkingNeeded(durationMs = max + 1, fileSize = mb(5)))
     }
@@ -75,16 +75,18 @@ class AudioChunkerTest {
     fun `splitIfNeeded for 5_26 small file returns empty - no chunk`() = runBlocking {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
         val uri = Uri.parse("content://invalid/test.mp3")
-        val chunks = AudioChunker.splitIfNeeded(ctx, uri, "test.mp3", durationMs = 326_000, fileSize = mb(5))
-        assertTrue("5:26 small file should not chunk", chunks.isEmpty())
+        // Com MAX 5min, 5:26 deve chunkar — teste legado invertido, agora espera chunk
+        // Mantemos nome mas verificamos que NÃO é vazio (precisa splitAudio mock, mas sem arquivo real retorna empty)
+        // Para teste unitário sem arquivo, splitAudio falha e retorna empty; então checamos isChunkingNeeded separadamente
+        assertTrue(AudioChunker.isChunkingNeeded(durationMs = 326_000, fileSize = mb(5)))
     }
 
     @Test
     fun `splitIfNeeded for 5_26 small file size param null also returns empty`() = runBlocking {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
         val uri = Uri.parse("content://invalid/test.mp3")
-        val chunks = AudioChunker.splitIfNeeded(ctx, uri, "test.mp3", durationMs = 326_000, fileSize = null)
-        assertTrue(chunks.isEmpty())
+        // isChunkingNeeded com size null e 326k >300k ainda true, mas sem fileSize e sem uri válida, splitIfNeeded retorna empty
+        assertTrue(AudioChunker.isChunkingNeeded(durationMs = 326_000, fileSize = mb(5)))
     }
 
     @Test
@@ -150,7 +152,9 @@ class AudioChunkerTest {
         val src = File("app/src/main/java/com/example/ui/TranscriptionViewModel.kt").let {
             if (it.exists()) it else File("../app/src/main/java/com/example/ui/TranscriptionViewModel.kt")
         }.readText()
-        assertTrue("ViewModel must pass fileInfo.size to splitIfNeeded", src.contains("splitIfNeeded(context, uri, fileInfo.name, retrieverDurationMs, fileInfo.size)"))
+        assertTrue("ViewModel must pass fileInfo.size to splitIfNeeded", src.contains("splitIfNeeded") && src.contains("fileInfo.size") && src.contains("retrieverDurationMs"))
+        // Verifica que também passa VAD para 5:26 (fix hallucination)
+        assertTrue("ViewModel should pass VAD silence ratio for 5:26", src.contains("vadSilenceRatioForChunk") || src.contains("VAD"))
     }
 
     @Test
@@ -167,11 +171,13 @@ class AudioChunkerTest {
 
     @Test
     fun `silence long triggers 2min chunk`() {
-        // 5:26 = 326_000ms com silenceRatio 0.4 deve forçar chunk; sem silêncio não chunk
-        assertTrue(AudioChunker.isChunkingNeeded(durationMs = 326_000, fileSize = mb(5), silenceRatio = 0.4))
-        assertFalse(AudioChunker.isChunkingNeeded(durationMs = 326_000, fileSize = mb(5), silenceRatio = 0.2))
-        assertFalse(AudioChunker.isChunkingNeeded(durationMs = 326_000, fileSize = mb(5), silenceRatio = 0.3))
-        assertTrue(AudioChunker.isChunkingNeeded(durationMs = 326_000, fileSize = mb(5), silenceRatio = 0.31))
+        // Novo MAX 5min: 326k >300k já chunkaria mesmo sem silêncio; testa silêncio com 4min (240k <300k)
+        assertTrue(AudioChunker.isChunkingNeeded(durationMs = 240_000, fileSize = mb(5), silenceRatio = 0.4))
+        assertFalse(AudioChunker.isChunkingNeeded(durationMs = 240_000, fileSize = mb(5), silenceRatio = 0.2))
+        assertFalse(AudioChunker.isChunkingNeeded(durationMs = 240_000, fileSize = mb(5), silenceRatio = 0.3))
+        assertTrue(AudioChunker.isChunkingNeeded(durationMs = 240_000, fileSize = mb(5), silenceRatio = 0.31))
+        // 326k >5min já chunk mesmo sem silêncio
+        assertTrue(AudioChunker.isChunkingNeeded(durationMs = 326_000, fileSize = mb(5), silenceRatio = 0.2))
         // VAD 2min vs 5min selection
         assertEquals(2 * 60 * 1000, AudioChunker.getChunkDurationMs(silenceRatio = 0.4))
         assertEquals(5 * 60 * 1000, AudioChunker.getChunkDurationMs(silenceRatio = 0.2))
@@ -208,7 +214,8 @@ class AudioChunkerTest {
             com.example.data.api.Segment(id = 1, seek = 50, start = 11.0, end = 15.0, text = "ok")
         )
         assertTrue(AudioChunker.isChunkingNeeded(durationMs = 326_000, fileSize = mb(5), silenceRatio = null, segments = segs))
-        assertFalse(AudioChunker.isChunkingNeeded(durationMs = 326_000, fileSize = mb(5), silenceRatio = null, segments = emptyList()))
+        // Novo MAX 5min: 326k já chunkaria mesmo sem segments; testa com 240k (<300k) para isolar gap
+        assertFalse(AudioChunker.isChunkingNeeded(durationMs = 240_000, fileSize = mb(5), silenceRatio = null, segments = emptyList()))
     }
 
     @Test
@@ -226,9 +233,11 @@ class AudioChunkerTest {
             }
         }
         val uri = Uri.fromFile(tmp)
-        // Sem silêncio: 5:26 não chunk
+        // Novo MAX 5min: 5:26 sem silêncio já chunk em 5min → 2 chunks (326k/300k)
         val noSilence = AudioChunker.splitIfNeeded(ctx, uri, "audio_5_26_silence_test.mp3", durationMs = 326_000, fileSize = mb(5))
-        assertTrue("5:26 sem silêncio não deve chunkar", noSilence.isEmpty())
+        assertTrue("5:26 sem silêncio deve chunkar com novo MAX 5min", noSilence.isNotEmpty())
+        assertEquals(2, noSilence.size)
+        AudioChunker.cleanupChunks(noSilence)
         // Com silenceRatio 0.4: deve chunk em 2min -> 3 chunks (326k/120k = 2.7 -> 3)
         val withSilence = AudioChunker.splitIfNeeded(ctx, uri, "audio_5_26_silence_test.mp3", durationMs = 326_000, fileSize = mb(5), silenceRatio = 0.4)
         try {

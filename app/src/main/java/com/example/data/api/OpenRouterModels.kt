@@ -54,11 +54,34 @@ data class OpenRouterError(
     @Json(name = "message") val message: String? = null,
     @Json(name = "code") val code: Int? = null
 )
-
 @JsonClass(generateAdapter = true)
 data class OpenRouterChatCompletionRequest(
     @Json(name = "model") val model: String,
     @Json(name = "messages") val messages: List<ChatMessage>,
+    @Json(name = "temperature") val temperature: Double? = 0.1,
+    @Json(name = "max_tokens") val maxTokens: Int? = 16384,
+    @Json(name = "top_p") val topP: Double? = 0.1
+)
+
+// Multimodal chat via input_audio (OpenRouter /api/v1/chat/completions com audio)
+// Formato documentado em https://openrouter.ai/docs/guides/overview/multimodal/audio
+@JsonClass(generateAdapter = true)
+data class ChatContentPart(
+    @Json(name = "type") val type: String, // "text" ou "input_audio"
+    @Json(name = "text") val text: String? = null,
+    @Json(name = "input_audio") val inputAudio: InputAudio? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class ChatMessageMultimodal(
+    @Json(name = "role") val role: String,
+    @Json(name = "content") val content: List<ChatContentPart>
+)
+
+@JsonClass(generateAdapter = true)
+data class OpenRouterMultimodalChatRequest(
+    @Json(name = "model") val model: String,
+    @Json(name = "messages") val messages: List<ChatMessageMultimodal>,
     @Json(name = "temperature") val temperature: Double? = 0.1,
     @Json(name = "max_tokens") val maxTokens: Int? = 16384,
     @Json(name = "top_p") val topP: Double? = 0.1
@@ -69,7 +92,6 @@ data class ChatMessage(
     @Json(name = "role") val role: String,
     @Json(name = "content") val content: String
 )
-
 @JsonClass(generateAdapter = true)
 data class OpenRouterChatCompletionResponse(
     @Json(name = "choices") val choices: List<ChatChoice>? = null,
