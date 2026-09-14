@@ -152,7 +152,12 @@ class AudioChunkerTest {
         val src = File("app/src/main/java/com/example/ui/TranscriptionViewModel.kt").let {
             if (it.exists()) it else File("../app/src/main/java/com/example/ui/TranscriptionViewModel.kt")
         }.readText()
-        assertTrue("ViewModel must pass fileInfo.size to splitIfNeeded", src.contains("splitIfNeeded") && src.contains("fileInfo.size") && src.contains("retrieverDurationMs"))
+        assertTrue(
+            "ViewModel must pass the file size to splitIfNeeded",
+            src.contains("splitIfNeeded") &&
+                (src.contains("fileInfo.size") || src.contains("workInfo.size")) &&
+                src.contains("retrieverDurationMs")
+        )
         // Verifica que também passa VAD para 5:26 (fix hallucination)
         assertTrue("ViewModel should pass VAD silence ratio for 5:26", src.contains("vadSilenceRatioForChunk") || src.contains("VAD"))
     }

@@ -48,8 +48,8 @@ class WavCompatTest {
     }
 
     @Test fun `downmix tira media dos canais`() {
-        assertEquals(listOf(0, 2000), WavTranscoder.downmixToMono(shortArrayOf(0, 0, 1000, 3000), 2).toList())
-        assertEquals(listOf(5, 6), WavTranscoder.downmixToMono(shortArrayOf(5, 6), 1).toList())
+        assertEquals(listOf<Short>(0, 2000), WavTranscoder.downmixToMono(shortArrayOf(0, 0, 1000, 3000), 2).toList())
+        assertEquals(listOf<Short>(5, 6), WavTranscoder.downmixToMono(shortArrayOf(5, 6), 1).toList())
     }
 
     @Test fun `reamostragem preserva duracao com interpolacao linear`() {
